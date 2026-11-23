@@ -537,7 +537,7 @@ its owner does, and a suspended owner's tokens are refused.
   listing sessions and reading their state, events, messages, and diffs; creating a session and
   prompting one; reading automations and skills; creating and triggering automations; and importing
   skills. A session snapshot read with a token never includes sandbox editor, terminal, or tunnel
-  URLs, and sandbox access, stopping, archiving, and pull request creation stay browser-only. A
+  URLs, and sandbox access, stopping, archiving, and pull request creation still refuse tokens. A
   prompt still has the agent act in the sandbox as the session allows.
 - A token's `sessions.collaborate` needs `sessions.read`, as `skills.manage` needs `skills.read`. A
   session a token creates includes the owner's personal memory only when the token holds

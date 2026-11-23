@@ -821,7 +821,8 @@ checks. Some things differ from the browser:
 - A token's prompt is not eligible for the owner's personal MCP servers, and may not reference
   attachments, which no token route can upload.
 - A token-created session resolves provider auth as unattended, so the workspace's provider setting
-  for automated use applies; a token cannot show that a person is present.
+  for automated use applies; a token cannot show that a person is present. A token may not send
+  `providerSelections`, since an explicit selection is resolved before that setting.
 - GitHub credentials are resolved from the stored user record, as for any non-browser principal.
 
 Editing, pausing, or deleting automations, bulk skill import, every other session mutation (stop,

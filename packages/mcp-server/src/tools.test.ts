@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MAX_AUTOMATION_NAME_LENGTH } from "@open-inspect/shared/types/automations";
 import { z } from "zod";
-import type { ControlPlaneClient } from "./client";
+import { ControlPlaneError, type ControlPlaneClient } from "./client";
 import { TOOLS, type ToolDefinition } from "./tools";
 
 function tool(name: string): ToolDefinition {
@@ -309,19 +309,42 @@ describe("create_session", () => {
     expect(JSON.parse(JSON.stringify(body))).toEqual({ environmentId: "env_1" });
   });
 
-  it("names the created session when its first prompt fails, so it is not created twice", async () => {
-    const { client, post } = fakeClient({
+  /** A create that succeeds, then a first prompt that fails with `failure`. */
+  function createThenPromptFails(failure: Error) {
+    return fakeClient({
       post: (path) => {
         if (path === "/sessions") return { sessionId: "sess_1", status: "created" };
-        throw new Error("POST /sessions/sess_1/prompt returned 403: permission_required");
+        throw failure;
       },
     });
+  }
+
+  it("names the created session when its first prompt is refused, so it is not created twice", async () => {
+    const { client, post } = createThenPromptFails(
+      new ControlPlaneError("POST /sessions/sess_1/prompt returned 403: permission_required", 403)
+    );
 
     await expect(tool("create_session").run(client, { prompt: "Investigate" })).rejects.toThrow(
       /Session sess_1 was created, but its first prompt was not sent: .*403.*send_prompt/
     );
     expect(post).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    ["a timeout", new ControlPlaneError("POST /sessions/sess_1/prompt failed: timed out", null)],
+    ["a dropped connection", new TypeError("fetch failed")],
+  ])(
+    "does not call the first prompt unsent after %s, since it may already be queued",
+    async (_case, failure) => {
+      const { client } = createThenPromptFails(failure);
+
+      const outcome = tool("create_session").run(client, { prompt: "Investigate" });
+
+      await expect(outcome).rejects.toThrow(/Session sess_1 was created/);
+      await expect(outcome).rejects.toThrow(/may already be queued.*get_session/);
+      await expect(outcome).rejects.not.toThrow(/was not sent/);
+    }
+  );
 
   it("refuses a creation response it does not recognize rather than prompting nothing", async () => {
     const { client, post } = fakeClient({ post: () => ({ status: "created" }) });

@@ -77,6 +77,24 @@ async function withTokenIn(
   );
 }
 
+const SUBSCRIPTION_ACCOUNT_ID = "a".repeat(32);
+
+/** An Anthropic subscription account as the installation default, with API keys for automated use. */
+async function seedSubscriptionDefaultWithApiKeyForAutomation() {
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO model_provider_accounts
+         (id, provider, display_name, status, created_by, updated_by, created_at, updated_at)
+       VALUES (?, 'anthropic', 'Team plan', 'active', ?, ?, 1, 1)`
+    ).bind(SUBSCRIPTION_ACCOUNT_ID, ADMIN, ADMIN),
+    env.DB.prepare(
+      `INSERT INTO model_provider_account_defaults
+         (provider, provider_account_id, unattended_mode, created_by, updated_by, created_at, updated_at)
+       VALUES ('anthropic', ?, 'api_key', ?, ?, 1, 1)`
+    ).bind(SUBSCRIPTION_ACCOUNT_ID, ADMIN, ADMIN),
+  ]);
+}
+
 async function saveAutomation(id: string, userId: string) {
   await env.DB.prepare(
     `INSERT INTO automations
@@ -164,13 +182,26 @@ describe("reading sessions with a token", () => {
   });
 });
 
-/** Give a session's sandbox the editor and tunnel URLs a running sandbox would report. */
+/** Every snapshot field that locates the sandbox, as `redactSessionSnapshotSandboxAccess` removes them. */
+const SANDBOX_URL_FIELDS = [
+  "codeServerUrl",
+  "vncUrl",
+  "ttydUrl",
+  "tunnelUrls",
+  "sandboxDashboardUrl",
+] as const;
+
+/** Give a session's sandbox every URL a running sandbox reports, and the object its dashboard links to. */
 async function seedSandboxUrls(stub: DurableObjectStub) {
   await runInSessionDO(stub, (_instance, state) => {
     state.storage.sql.exec(
-      "UPDATE sandbox SET code_server_url = ?, tunnel_urls = ?",
+      `UPDATE sandbox SET code_server_url = ?, vnc_url = ?, ttyd_url = ?, tunnel_urls = ?,
+         modal_object_id = ?`,
       "https://editor.test",
-      JSON.stringify({ "3000": "https://tunnel.test" })
+      "https://vnc.test",
+      "https://terminal.test",
+      JSON.stringify({ "3000": "https://tunnel.test" }),
+      "sb-dashboard-object"
     );
   });
 }
@@ -205,20 +236,21 @@ describe("reading one session with a token", () => {
     });
     expect(browser.status).toBe(200);
     await expect(browser.json()).resolves.toMatchObject({
-      session: { codeServerUrl: "https://editor.test" },
+      session: {
+        codeServerUrl: "https://editor.test",
+        vncUrl: "https://vnc.test",
+        ttydUrl: "https://terminal.test",
+        tunnelUrls: { "3000": "https://tunnel.test" },
+        sandboxDashboardUrl: expect.stringContaining("sb-dashboard-object"),
+      },
     });
 
     const token = await issueToken(OWNER, ["sessions.read", "sessions.sandbox_access"]);
     const response = await withToken(token, `/sessions/${sessionName}`);
     expect(response.status).toBe(200);
     const body = await response.json();
-    for (const field of [
-      "codeServerUrl",
-      "sandboxDashboardUrl",
-      "vncUrl",
-      "ttydUrl",
-      "tunnelUrls",
-    ]) {
+    // Every field the browser received above is populated, so each absence here is a redaction.
+    for (const field of SANDBOX_URL_FIELDS) {
       expect(body).not.toHaveProperty(`session.${field}`);
     }
   });
@@ -324,18 +356,7 @@ describe("creating a session with a token", () => {
   });
 
   it("follows the workspace's provider policy for automated use", async () => {
-    await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO model_provider_accounts
-           (id, provider, display_name, status, created_by, updated_by, created_at, updated_at)
-         VALUES ('subscription', 'anthropic', 'Team plan', 'active', ?, ?, 1, 1)`
-      ).bind(ADMIN, ADMIN),
-      env.DB.prepare(
-        `INSERT INTO model_provider_account_defaults
-           (provider, provider_account_id, unattended_mode, created_by, updated_by, created_at, updated_at)
-         VALUES ('anthropic', 'subscription', 'api_key', ?, ?, 1, 1)`
-      ).bind(ADMIN, ADMIN),
-    ]);
+    await seedSubscriptionDefaultWithApiKeyForAutomation();
     const token = await issueToken(OWNER, ["sessions.create"]);
 
     const response = await withToken(token, "/sessions", {
@@ -353,6 +374,28 @@ describe("creating a session with a token", () => {
         .bind(sessionId)
         .first()
     ).toEqual({ auth_mode: "api_key", selection_source: "unattended_policy" });
+  });
+
+  it("refuses an explicit provider selection, which would bypass that policy", async () => {
+    await seedSubscriptionDefaultWithApiKeyForAutomation();
+    const token = await issueToken(OWNER, ["sessions.create"]);
+
+    const response = await withToken(token, "/sessions", {
+      method: "POST",
+      body: {
+        title: "Pinned account",
+        harness: "claude",
+        model: "anthropic/claude-sonnet-4-6",
+        providerSelections: {
+          anthropic: { mode: "provider_account", accountId: SUBSCRIPTION_ACCOUNT_ID },
+        },
+      },
+    });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "Provider selections are not accepted from personal access tokens",
+    });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM sessions").first("n")).toBe(0);
   });
 
   it("needs sessions.create, though its owner holds it", async () => {

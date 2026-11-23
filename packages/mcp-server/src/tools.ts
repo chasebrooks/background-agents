@@ -42,7 +42,7 @@ import type {
 } from "@open-inspect/shared/types/session-api";
 import { sessionVisibilitySchema } from "@open-inspect/shared/types/teams";
 import { z } from "zod";
-import type { ControlPlaneClient } from "./client";
+import { ControlPlaneError, type ControlPlaneClient } from "./client";
 
 /**
  * Page caps, matching what the control-plane handlers themselves enforce.
@@ -436,12 +436,21 @@ export const TOOLS: ToolDefinition[] = [
         const prompt = await sendPrompt(client, id, { content: args.prompt });
         return { sessionId: id, prompt };
       } catch (cause) {
-        // The session exists either way. Name it, so the model sends the prompt to this session
-        // rather than starting a second one.
+        // The session exists either way. Name it, so the model works with this session rather
+        // than starting a second one.
         const reason = cause instanceof Error ? cause.message : String(cause);
+        // Only an HTTP answer says the control plane refused the prompt. A timeout or a dropped
+        // connection can come after the prompt was queued, and resending it would repeat the work.
+        if (cause instanceof ControlPlaneError && cause.status !== null) {
+          throw new Error(
+            `Session ${id} was created, but its first prompt was not sent: ${reason}. Send it ` +
+              "with send_prompt rather than creating another session."
+          );
+        }
         throw new Error(
-          `Session ${id} was created, but its first prompt was not sent: ${reason}. Send it ` +
-            "with send_prompt rather than creating another session."
+          `Session ${id} was created, but whether its first prompt arrived is unknown: ${reason}. ` +
+            "It may already be queued, so read the session with get_session before sending it " +
+            "again with send_prompt, and do not create another session."
         );
       }
     },

@@ -154,7 +154,9 @@ from it, and steer it while it runs.
   and an optional `branch` to start from) or one `environment_id`. It also takes an optional
   `team_id`, `visibility`, `title`, `harness`, `model`, and `reasoning_effort`. It creates the
   session, then sends the prompt. If the prompt is refused, the error names the session that was
-  created, so the assistant sends the prompt with `send_prompt` rather than starting another.
+  created, so the assistant sends the prompt with `send_prompt` rather than starting another. If the
+  prompt times out or the connection drops, it may already be queued, so the error says to read the
+  session with `get_session` before sending it again.
 - `send_prompt` queues a follow-up prompt behind whatever the session is processing. It works only
   on sessions you may collaborate on.
 - `get_session` reports whether the session is still working, the branch the agent works on, and its

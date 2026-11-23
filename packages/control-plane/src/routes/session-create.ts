@@ -125,6 +125,13 @@ export async function handleCreateSession(
   if (enforcement.rejection) return enforcement.rejection;
   const enforced = enforcement.enforced;
 
+  // A token's session resolves provider auth as unattended (below), and an explicit selection is
+  // resolved before that policy, so it would let a token bind an account the policy keeps from
+  // automated use.
+  if (ctx.principal?.kind === "personal-access-token" && body.providerSelections !== undefined) {
+    return error("Provider selections are not accepted from personal access tokens", 400);
+  }
+
   let repositoryContext: RepositoryPair | null;
   try {
     repositoryContext = normalizeOptionalRepositoryPair(body, INVALID_SESSION_REQUEST_BODY_ERROR);

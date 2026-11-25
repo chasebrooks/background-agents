@@ -363,8 +363,14 @@ describe("ControlPlaneClient over an in-process transport", () => {
     await expect(pending).rejects.toThrow("cancelled");
   });
 
-  it("times out a response whose body stalls after its headers", async () => {
-    const stalled = new ReadableStream<Uint8Array>({ start() {} });
+  it("times out a response whose body stalls after its headers, and closes its stream", async () => {
+    const cancelled = vi.fn();
+    const stalled = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"partial":'));
+      },
+      cancel: cancelled,
+    });
     const client = new ControlPlaneClient({
       baseUrl: BASE_URL,
       token: TOKEN,
@@ -372,6 +378,8 @@ describe("ControlPlaneClient over an in-process transport", () => {
       fetch: async () => new Response(stalled),
     });
 
+    // The partial body is never returned as a result.
     await expect(client.get("/sessions")).rejects.toThrow(/timed out after 20ms/);
+    await vi.waitFor(() => expect(cancelled).toHaveBeenCalled());
   });
 });

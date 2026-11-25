@@ -254,7 +254,7 @@ export class ControlPlaneClient {
         // Inside the same timer as the fetch: `fetch` resolves on headers, so a control plane that
         // sends headers and then stalls the body would hang the tool call if the timeout ended
         // here.
-        return { answered, text: await readCapped(answered) };
+        return { answered, text: await readCapped(answered, signal) };
       };
       // The network honours the signal itself. The in-process router does not, so the timeout and
       // cancellation are enforced around it instead: the caller stops waiting, though a route that
@@ -309,11 +309,17 @@ function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
  * length. An oversized body is an error rather than a truncation, because truncated JSON only
  * resurfaces later as a parse failure that blames the wrong thing.
  */
-async function readCapped(response: Response): Promise<string> {
+async function readCapped(response: Response, signal: AbortSignal): Promise<string> {
   if (!response.body) return "";
 
   const decoder = new TextDecoder("utf-8");
   const reader = response.body.getReader();
+  // A timeout or cancellation cancels the stream, so an abandoned read does not keep it open. The
+  // cancelled read then ends as if the body were complete, so the signal is checked after the loop:
+  // a partial body must never pass for a whole one.
+  const cancel = () => void reader.cancel().catch(() => {});
+  if (signal.aborted) cancel();
+  else signal.addEventListener("abort", cancel, { once: true });
   let total = 0;
   let text = "";
   try {
@@ -329,7 +335,9 @@ async function readCapped(response: Response): Promise<string> {
       }
       text += decoder.decode(value, { stream: true });
     }
+    signal.throwIfAborted();
   } finally {
+    signal.removeEventListener("abort", cancel);
     // An abort or an over-cap throw leaves the stream open; cancelling lets the socket close.
     void reader.cancel().catch(() => {});
   }

@@ -9,7 +9,8 @@
  * a direct API call. A tool can therefore do nothing the token could not do without MCP.
  *
  * Stateless: each request is served by a fresh MCP server instance, nothing is kept between
- * requests, and GET and DELETE (2025-era session operations) are answered `405`.
+ * requests, and GET and DELETE (2025-era session operations) are answered `405`. One request is
+ * one message: batches and `subscriptions/listen` are refused.
  */
 
 import { Hono } from "hono";
@@ -20,10 +21,14 @@ import { readPersonalAccessToken } from "../auth/personal-access-token";
 import { PersonalAccessTokenPolicyStore } from "../db/personal-access-token-policy";
 import { error } from "../http/responses";
 import { createLogger } from "../logger";
+import { McpError } from "../mcp/errors";
+import { readMcpBody } from "../mcp/relay";
 import { ControlPlaneClient, type ControlPlaneFetch } from "../mcp-tools/client";
 import { createHostedMcpServer } from "../mcp-tools/server";
 import { admit, dispatch } from "../routing/admit";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
+import { logPrincipal } from "../routing/request-lifecycle";
+import { recordPersonalAccessTokenUse } from "../routing/route-admission";
 import type { Env } from "../types";
 import {
   NO_AUTHORIZATION,
@@ -81,6 +86,92 @@ function routerTransport(inProcessFetch: ControlPlaneFetch, traceId: string): Co
   };
 }
 
+/** A JSON-RPC error answered before the MCP server sees the request. */
+function rpcError(code: number, message: string, status: number): Response {
+  return Response.json({ jsonrpc: "2.0", id: null, error: { code, message } }, { status });
+}
+
+const JSON_RPC_PARSE_ERROR = -32700;
+const JSON_RPC_INVALID_REQUEST = -32600;
+const JSON_RPC_METHOD_NOT_FOUND = -32601;
+
+/**
+ * The parsed body of an MCP POST, or the response refusing it. Read here, under the body cap,
+ * rather than by the SDK, so the shape can be checked first:
+ * - a JSON-RPC batch is refused (the 2025-06-18 revision removed batching), so one request is one
+ *   message and cannot fan out into many tool calls;
+ * - `subscriptions/listen` is refused: this server is stateless, has nothing to notify, and would
+ *   otherwise hold a stream open.
+ */
+async function readMessage(request: Request): Promise<{ message: unknown } | Response> {
+  let bytes: Uint8Array | undefined;
+  try {
+    bytes = await readMcpBody(request, HOSTED_MCP_MAX_REQUEST_BODY_BYTES);
+  } catch (cause) {
+    if (cause instanceof McpError && cause.status === 413) {
+      return rpcError(JSON_RPC_INVALID_REQUEST, "Request body too large", 413);
+    }
+    if (cause instanceof McpError && cause.status === 408) {
+      return rpcError(JSON_RPC_INVALID_REQUEST, "Request body timed out", 408);
+    }
+    throw cause;
+  }
+  let message: unknown;
+  try {
+    message = JSON.parse(new TextDecoder().decode(bytes ?? new Uint8Array()));
+  } catch {
+    return rpcError(JSON_RPC_PARSE_ERROR, "Parse error", 400);
+  }
+  if (Array.isArray(message)) {
+    return rpcError(JSON_RPC_INVALID_REQUEST, "Batch requests are not supported", 400);
+  }
+  if (
+    typeof message === "object" &&
+    message !== null &&
+    (message as { method?: unknown }).method === "subscriptions/listen"
+  ) {
+    return rpcError(
+      JSON_RPC_METHOD_NOT_FOUND,
+      "This server is stateless and sends no notifications",
+      400
+    );
+  }
+  return { message };
+}
+
+/** Per-request inputs the shared handler hands to the server factory. */
+interface ExchangeContext {
+  client: ControlPlaneClient;
+}
+
+/**
+ * One handler for every request. The SDK's handler is stateless for this server's traffic; each
+ * exchange still gets a fresh MCP server, built around that request's client, so nothing about
+ * one caller reaches another.
+ */
+const mcpHandler = createMcpHandler(
+  ({ authInfo }) => {
+    const exchange = authInfo?.extra as ExchangeContext | undefined;
+    if (!exchange) throw new Error("MCP exchange served without its request context");
+    return createHostedMcpServer(exchange.client);
+  },
+  {
+    legacy: "stateless",
+    // No tool streams progress, so a 2026-07-28 exchange is one JSON body. (2025-era requests are
+    // answered as a short event stream that ends with the result.)
+    responseMode: "json",
+    maxRequestBodySize: HOSTED_MCP_MAX_REQUEST_BODY_BYTES,
+    onerror: (cause) => {
+      // The message only: tool arguments can hold prompts and secrets, and are never logged.
+      // Ordinary protocol refusals land here too, so this is not a warning.
+      logger.info("MCP exchange failed", {
+        event: "hosted_mcp.exchange_failed",
+        error_message: cause.message,
+      });
+    },
+  }
+);
+
 async function serveMcp(
   request: Request,
   env: Env,
@@ -91,6 +182,7 @@ async function serveMcp(
   const policy = await new PersonalAccessTokenPolicyStore(ctx.db).get();
   if (!policy.mcpEnabled) return error("Not found", 404);
 
+  // Compares hostnames only, as the SDK's check does: scheme and port are not considered.
   const rejectedOrigin = originValidationResponse(request, allowedOriginHostnames(env));
   if (rejectedOrigin) return rejectedOrigin;
 
@@ -105,33 +197,29 @@ async function serveMcp(
   if (isAuthError(auth)) {
     return auth.status === 401 ? unauthorized(auth.reason) : error(auth.reason, auth.status);
   }
-
-  const client = new ControlPlaneClient({
-    baseUrl: new URL(request.url).origin,
-    token,
-    fetch: routerTransport(inProcessFetch, ctx.trace_id),
-  });
-  const handler = createMcpHandler(() => createHostedMcpServer(client), {
-    legacy: "stateless",
-    // No tool streams progress, so a 2026-07-28 exchange is one JSON body. (2025-era requests are
-    // answered as a short event stream that ends with the result.)
-    responseMode: "json",
-    maxRequestBodySize: HOSTED_MCP_MAX_REQUEST_BODY_BYTES,
-    onerror: (cause) => {
-      // The message only: tool arguments can hold prompts and secrets, and are never logged.
-      logger.warn("MCP exchange failed", {
-        event: "hosted_mcp.exchange_failed",
-        error_message: cause.message,
-        request_id: ctx.request_id,
-        trace_id: ctx.trace_id,
-      });
-    },
-  });
-  try {
-    return await handler.fetch(request);
-  } finally {
-    await handler.close();
+  logPrincipal(auth.principal, ctx, HOSTED_MCP_PATH);
+  if (auth.principal.kind === "personal-access-token") {
+    recordPersonalAccessTokenUse(ctx, auth.principal.tokenId);
   }
+
+  let parsedBody: unknown;
+  if (request.method === "POST") {
+    const read = await readMessage(request);
+    if (read instanceof Response) return read;
+    parsedBody = read.message;
+  }
+
+  const exchange: ExchangeContext = {
+    client: new ControlPlaneClient({
+      baseUrl: new URL(request.url).origin,
+      token,
+      fetch: routerTransport(inProcessFetch, ctx.trace_id),
+    }),
+  };
+  return mcpHandler.fetch(request, {
+    authInfo: { token, clientId: "personal-access-token", scopes: [], extra: { ...exchange } },
+    ...(parsedBody === undefined ? {} : { parsedBody }),
+  });
 }
 
 /**

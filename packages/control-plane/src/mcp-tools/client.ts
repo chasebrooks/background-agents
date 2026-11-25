@@ -231,25 +231,37 @@ export class ControlPlaneClient {
     try {
       // A late response to an earlier step must not dispatch a cancelled write.
       this.signal?.throwIfAborted();
+      const signal = this.signal
+        ? AbortSignal.any([this.signal, controller.signal])
+        : controller.signal;
       const init: RequestInit = {
         method,
         headers,
         ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-        signal: this.signal ? AbortSignal.any([this.signal, controller.signal]) : controller.signal,
+        signal,
       };
-      response = this.transport
-        ? // In-process: nothing is followed, and Workers refuses `redirect: "error"` on a Request.
-          await this.transport(new Request(url.toString(), init))
-        : await fetch(url.toString(), {
-            ...init,
-            // A redirect would carry the bearer token to wherever the response points. The
-            // control plane never redirects an API call, so one means something in between is
-            // misbehaving.
-            redirect: "error",
-          });
-      // Inside the same timer as the fetch: `fetch` resolves on headers, so a control plane that
-      // sends headers and then stalls the body would hang the tool call if the timeout ended here.
-      body = await readCapped(response);
+      const exchange = async () => {
+        const answered = this.transport
+          ? // In-process: nothing is followed, and Workers refuses `redirect: "error"` on a Request.
+            await this.transport(new Request(url.toString(), init))
+          : await fetch(url.toString(), {
+              ...init,
+              // A redirect would carry the bearer token to wherever the response points. The
+              // control plane never redirects an API call, so one means something in between is
+              // misbehaving.
+              redirect: "error",
+            });
+        // Inside the same timer as the fetch: `fetch` resolves on headers, so a control plane that
+        // sends headers and then stalls the body would hang the tool call if the timeout ended
+        // here.
+        return { answered, text: await readCapped(answered) };
+      };
+      // The network honours the signal itself. The in-process router does not, so the timeout and
+      // cancellation are enforced around it instead: the caller stops waiting, though a route that
+      // already started a write may still finish it.
+      ({ answered: response, text: body } = this.transport
+        ? await untilAborted(exchange(), signal)
+        : await exchange());
     } catch (cause) {
       this.signal?.throwIfAborted();
       // A cap breach already says exactly what happened; rewrapping it would hide that.
@@ -275,6 +287,18 @@ export class ControlPlaneClient {
 
     return { body, status: response.status };
   }
+}
+
+/** Settle with `work`, or reject with the signal's reason as soon as it aborts. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  // An abandoned exchange may still fail later; that failure has no one left to report to.
+  work.catch(() => {});
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    if (signal.aborted) return abort();
+    signal.addEventListener("abort", abort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
 }
 
 /**

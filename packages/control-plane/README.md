@@ -800,14 +800,15 @@ pins this list, so adding to it is a visible change:
 #### Hosted MCP server
 
 `/mcp` serves the MCP tools (`src/mcp-tools/`) over Streamable HTTP, statelessly: each request gets
-a fresh MCP server, nothing is kept between requests, and `GET` and `DELETE` answer `405`. The route
-is handler-authenticated and grants nothing itself. It answers `404` while the API policy's
-`mcp_enabled` is off, refuses a browser `Origin` other than `WEB_APP_URL` or `WORKER_URL`, and
-requires a live personal access token (a `401` with a `Bearer` challenge otherwise, and also when a
-service signature is present). Each tool call is then a request to this same app, made in-process
-with the same bearer token, so the route it reaches admits, narrows, and audits it exactly as a
-direct API call. Tool arguments are never logged. The local stdio server in `packages/mcp-server`
-registers the same tools and is deprecated.
+a fresh MCP server, nothing is kept between requests, and `GET` and `DELETE` answer `405`. One
+request is one message: JSON-RPC batches and `subscriptions/listen` are refused. The route is
+handler-authenticated and grants nothing itself. It answers `404` while the API policy's
+`mcp_enabled` is off, refuses a browser `Origin` whose hostname is not that of `WEB_APP_URL` or
+`WORKER_URL`, and requires a live personal access token (a `401` with a `Bearer` challenge
+otherwise, and also when a service signature is present). Each tool call is then a request to this
+same app, made in-process with the same bearer token, so the route it reaches admits, narrows, and
+audits it exactly as a direct API call. Tool arguments are never logged. The local stdio server in
+`packages/mcp-server` registers the same tools and is deprecated.
 
 Five rules reach past route admission:
 

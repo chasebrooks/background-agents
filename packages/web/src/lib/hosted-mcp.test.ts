@@ -7,4 +7,8 @@ describe("hostedMcpUrl", () => {
     expect(hostedMcpUrl("wss://cp.example.com/sessions")).toBe("https://cp.example.com/mcp");
     expect(hostedMcpUrl("ws://localhost:8787")).toBe("http://localhost:8787/mcp");
   });
+
+  it("is null for a URL it cannot parse", () => {
+    expect(hostedMcpUrl("not a url")).toBeNull();
+  });
 });

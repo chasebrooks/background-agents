@@ -8,11 +8,8 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import type { ControlPlaneClient } from "./client";
-import { callTool, toolAnnotations, toolDescription } from "./registration";
+import { callTool, MCP_SERVER_INFO, toolAnnotations, toolDescription } from "./registration";
 import { TOOLS } from "./tools";
-
-/** The name and version the server reports to clients. */
-const MCP_SERVER_INFO = { name: "open-inspect", version: "0.2.0" } as const;
 
 /** Build a server whose tools act through `client`. */
 export function createHostedMcpServer(client: ControlPlaneClient): McpServer {

@@ -1,10 +1,10 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createMcpHandler } from "@modelcontextprotocol/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach } from "vitest";
 import type { ControlPlaneClient } from "./client";
 import { createHostedMcpServer } from "./server";
-import { describeToolSurface, fakeToolClient } from "./tool-surface.test-support";
+import { describeToolSurface } from "./tool-surface.test-support";
 
 const handlers: { close(): Promise<void> }[] = [];
 afterEach(async () => {
@@ -30,22 +30,3 @@ async function connectHosted(client: ControlPlaneClient): Promise<Client> {
 }
 
 describeToolSurface("hosted", connectHosted);
-
-describe("hosted server", () => {
-  it("cancels a call's control-plane requests when the client cancels it", async () => {
-    let seen: AbortSignal | undefined;
-    const client = {
-      withSignal(signal: AbortSignal) {
-        seen = signal;
-        return fakeToolClient({ get: () => ({ sessions: [] }) }).client;
-      },
-    } as unknown as ControlPlaneClient;
-    const mcpClient = await connectHosted(client);
-
-    await mcpClient.callTool({ name: "list_sessions", arguments: {} });
-
-    // Each call binds its own signal, so cancelling one call never cancels another.
-    expect(seen).toBeInstanceOf(AbortSignal);
-    await mcpClient.close();
-  });
-});

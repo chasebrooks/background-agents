@@ -178,6 +178,24 @@ describe("PersonalAccessTokenAdminSettings", () => {
     );
   });
 
+  it("hides the MCP switch for a control plane that predates it, and saves without it", async () => {
+    // Deploys can briefly pair this app with an older control plane, which refuses the field.
+    const { mcpEnabled: _omitted, ...older } = OPEN_POLICY;
+    hooks.policy = older as typeof OPEN_POLICY;
+    hooks.save.mockResolvedValue({ status: "saved", policy: { ...older, revision: 4 } });
+    const user = userEvent.setup();
+    render(<PersonalAccessTokenAdminSettings />);
+
+    expect(screen.queryByRole("switch", { name: "Allow MCP clients" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: /30 days/ }));
+    await user.click(screen.getByRole("button", { name: "Save policy" }));
+
+    expect(hooks.save).toHaveBeenCalledWith(
+      { enabled: true, maxLifetimeDays: 30, allowedPermissions: null },
+      3
+    );
+  });
+
   it("refuses an empty permission ceiling unless tokens are turned off", async () => {
     const saved = { ...OPEN_POLICY, enabled: false, allowedPermissions: [], revision: 4 };
     hooks.save.mockResolvedValue({ status: "saved", policy: saved });

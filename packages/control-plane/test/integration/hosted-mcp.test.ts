@@ -291,6 +291,61 @@ describe("hosted MCP admission", () => {
     expect(response.status).toBe(413);
   });
 
+  it("takes one message per request: batches and subscriptions are refused", async () => {
+    const token = await issueToken(OWNER, ["sessions.read"]);
+    const list = { jsonrpc: "2.0", method: "tools/list", params: {} };
+    const batch = await post(
+      { Authorization: `Bearer ${token}` },
+      Array.from({ length: 3 }, (_, id) => ({ ...list, id }))
+    );
+    expect(batch.status).toBe(400);
+    await expect(batch.json()).resolves.toMatchObject({ error: { code: -32600 } });
+
+    const listen = await post(
+      { Authorization: `Bearer ${token}` },
+      { jsonrpc: "2.0", id: 1, method: "subscriptions/listen", params: {} }
+    );
+    expect(listen.status).toBe(400);
+    await expect(listen.json()).resolves.toMatchObject({ error: { code: -32601 } });
+
+    const malformed = await post({ Authorization: `Bearer ${token}` }, "{not json");
+    expect(malformed.status).toBe(400);
+  });
+
+  it("serves the 2026-07-28 protocol as one JSON response", async () => {
+    const { sessionName } = await initSession({ userId: OWNER, title: "Modern" });
+    const token = await issueToken(OWNER, ["sessions.read"]);
+    const response = await post(
+      {
+        Authorization: `Bearer ${token}`,
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "get_session",
+      },
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "get_session",
+          arguments: { session_id: sessionName },
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { name: "modern", version: "0" },
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toMatch(/^application\/json/);
+    const body = await response.json<{
+      result: { isError?: boolean; content: { text: string }[] };
+    }>();
+    expect(body.result.isError).toBeFalsy();
+    expect(body.result.content[0]?.text).toContain("Modern");
+  });
+
   it("is stateless: GET and DELETE are not served", async () => {
     const token = await issueToken(OWNER, ["sessions.read"]);
     for (const method of ["GET", "DELETE"]) {

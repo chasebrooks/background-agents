@@ -8,7 +8,6 @@ import {
   PERSONAL_ACCESS_TOKEN_GRANTABLE_PERMISSIONS,
   personalAccessTokenEffectiveExpiry,
   type PersonalAccessTokenPolicy,
-  type PersonalAccessTokenPolicySnapshot,
   type WorkspacePersonalAccessToken,
 } from "@open-inspect/shared/types/personal-access-tokens";
 import {
@@ -17,6 +16,7 @@ import {
   saveWorkspacePersonalAccessTokenPolicy,
   useWorkspacePersonalAccessTokenPolicy,
   useWorkspacePersonalAccessTokens,
+  type WorkspaceApiPolicy,
 } from "@/hooks/use-workspace-personal-access-tokens";
 import { personalAccessTokenPermissionLabel } from "@/lib/personal-access-token-permissions";
 import { formatLastUsed, formatTokenExpiry } from "@/lib/personal-access-token-display";
@@ -36,7 +36,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { PersonalAccessTokenPermissionPicker } from "./personal-access-token-permission-picker";
 import { useSettingsUnsavedChanges } from "./settings-navigation-guard";
-import { HOSTED_MCP_URL } from "@/lib/hosted-mcp";
+import { CONTROL_PLANE_WS_URL } from "@/lib/control-plane-ws-url";
+import { hostedMcpUrl } from "@/lib/hosted-mcp";
 
 /** Lifetime caps an administrator can choose besides none (the system maximum), longest first. */
 const LIFETIME_CAP_DAYS: readonly number[] = [180, 90, 30, 7];
@@ -66,11 +67,14 @@ function ownerLabel(owner: WorkspacePersonalAccessToken["owner"]): string {
   return owner.displayName ?? owner.email ?? owner.userId;
 }
 
-/** The rules of a policy snapshot, without its revision and authorship. */
-function rulesOf(policy: PersonalAccessTokenPolicySnapshot): PersonalAccessTokenPolicy {
+/**
+ * The rules of a policy snapshot, without its revision and authorship. The MCP switch is left out
+ * when the control plane did not send it, so saving never names a field it would refuse.
+ */
+function rulesOf(policy: WorkspaceApiPolicy): PersonalAccessTokenPolicy {
   return {
     enabled: policy.enabled,
-    mcpEnabled: policy.mcpEnabled,
+    ...(policy.mcpEnabled === undefined ? {} : { mcpEnabled: policy.mcpEnabled }),
     maxLifetimeDays: policy.maxLifetimeDays,
     allowedPermissions: policy.allowedPermissions,
   };
@@ -96,7 +100,7 @@ function PolicySection() {
   // revision, so a policy someone else saved meanwhile is refused rather than overwritten, and a
   // revalidation never replaces the edits. Null while the form shows the loaded policy.
   const [editing, setEditing] = useState<{
-    base: PersonalAccessTokenPolicySnapshot;
+    base: WorkspaceApiPolicy;
     draft: PersonalAccessTokenPolicy;
   } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -115,6 +119,7 @@ function PolicySection() {
   const shown = editing?.base ?? loaded;
   const draft = editing?.draft ?? rulesOf(loaded);
   const lifetimeCaps = lifetimeCapChoices(shown.maxLifetimeDays);
+  const mcpUrl = hostedMcpUrl(CONTROL_PLANE_WS_URL);
   const ceiling = new Set(draft.allowedPermissions?.filter(isPersonalAccessTokenGrantable) ?? []);
 
   function edit(next: PersonalAccessTokenPolicy) {
@@ -180,22 +185,31 @@ function PolicySection() {
           />
         </div>
 
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <label htmlFor="hosted-mcp-enabled" className="text-sm font-medium text-foreground">
-              Allow MCP clients
-            </label>
-            <p className="text-xs text-muted-foreground">
-              Members connect an MCP client to <code>{HOSTED_MCP_URL}</code> with an access token.
-              Off refuses MCP; tokens keep working with the API.
-            </p>
+        {draft.mcpEnabled !== undefined && (
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <label htmlFor="hosted-mcp-enabled" className="text-sm font-medium text-foreground">
+                Allow MCP clients
+              </label>
+              <p className="text-xs text-muted-foreground">
+                {mcpUrl ? (
+                  <>
+                    Members connect an MCP client to <code>{mcpUrl}</code> with an access
+                    token.{" "}
+                  </>
+                ) : (
+                  "Members connect an MCP client to the control plane's /mcp with an access token. "
+                )}
+                Off refuses MCP; tokens keep working with the API.
+              </p>
+            </div>
+            <Switch
+              id="hosted-mcp-enabled"
+              checked={draft.mcpEnabled}
+              onCheckedChange={(mcpEnabled) => edit({ ...draft, mcpEnabled })}
+            />
           </div>
-          <Switch
-            id="hosted-mcp-enabled"
-            checked={draft.mcpEnabled ?? true}
-            onCheckedChange={(mcpEnabled) => edit({ ...draft, mcpEnabled })}
-          />
-        </div>
+        )}
 
         <fieldset>
           <legend className="text-sm font-medium text-foreground">Longest lifetime</legend>

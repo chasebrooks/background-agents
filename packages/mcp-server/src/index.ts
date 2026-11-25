@@ -16,6 +16,7 @@ import type { ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-com
 import { ControlPlaneClient } from "@open-inspect/control-plane/src/mcp-tools/client";
 import {
   callTool,
+  MCP_SERVER_INFO,
   toolAnnotations,
   toolDescription,
 } from "@open-inspect/control-plane/src/mcp-tools/registration";
@@ -32,7 +33,7 @@ function requireEnv(name: string): string {
 }
 
 export function createServer(client: ControlPlaneClient): McpServer {
-  const server = new McpServer({ name: "open-inspect", version: "0.1.0" });
+  const server = new McpServer({ ...MCP_SERVER_INFO });
 
   for (const tool of TOOLS) {
     server.registerTool(

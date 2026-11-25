@@ -9,6 +9,9 @@
 import { ControlPlaneError, type ControlPlaneClient } from "./client";
 import type { ToolDefinition } from "./tools";
 
+/** The name and version both servers report to clients. */
+export const MCP_SERVER_INFO = { name: "open-inspect", version: "0.1.0" } as const;
+
 /** The description a client shows the model, naming the grant the tool needs. */
 export function toolDescription(tool: ToolDefinition): string {
   return `${tool.description} Requires a token granted ${tool.requires}.`;

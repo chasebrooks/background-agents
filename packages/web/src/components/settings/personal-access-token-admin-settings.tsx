@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { PersonalAccessTokenPermissionPicker } from "./personal-access-token-permission-picker";
 import { useSettingsUnsavedChanges } from "./settings-navigation-guard";
+import { HOSTED_MCP_URL } from "@/lib/hosted-mcp";
 
 /** Lifetime caps an administrator can choose besides none (the system maximum), longest first. */
 const LIFETIME_CAP_DAYS: readonly number[] = [180, 90, 30, 7];
@@ -66,9 +67,10 @@ function ownerLabel(owner: WorkspacePersonalAccessToken["owner"]): string {
 }
 
 /** The rules of a policy snapshot, without its revision and authorship. */
-function rulesOf(policy: PersonalAccessTokenPolicy): PersonalAccessTokenPolicy {
+function rulesOf(policy: PersonalAccessTokenPolicySnapshot): PersonalAccessTokenPolicy {
   return {
     enabled: policy.enabled,
+    mcpEnabled: policy.mcpEnabled,
     maxLifetimeDays: policy.maxLifetimeDays,
     allowedPermissions: policy.allowedPermissions,
   };
@@ -106,7 +108,7 @@ function PolicySection() {
 
   if (loading) return <div className="text-sm text-muted-foreground">Loading...</div>;
   if (error || !policy) {
-    return <div className="text-sm text-destructive">Failed to load the access token policy.</div>;
+    return <div className="text-sm text-destructive">Failed to load the API policy.</div>;
   }
 
   const loaded = policy;
@@ -140,7 +142,7 @@ function PolicySection() {
       }
       await mutate(result.policy, { revalidate: false });
       setEditing(null);
-      toast.success("Access token policy saved");
+      toast.success("API policy saved");
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Failed to save the policy");
     } finally {
@@ -151,12 +153,13 @@ function PolicySection() {
   return (
     <section aria-labelledby="access-token-policy-heading">
       <h2 id="access-token-policy-heading" className="mb-1 text-xl font-semibold text-foreground">
-        Access token policy
+        API policy
       </h2>
       <p className="mb-6 text-sm text-muted-foreground">
-        Rules for every member&apos;s personal access tokens. Changes apply to existing tokens at
-        once: turning tokens off stops all of them, a shorter lifetime expires older tokens early,
-        and a narrower set of permissions narrows every token&apos;s grant.
+        Rules for API access with every member&apos;s personal access tokens, including over MCP.
+        Changes apply to existing tokens at once: turning tokens off stops all of them, a shorter
+        lifetime expires older tokens early, and a narrower set of permissions narrows every
+        token&apos;s grant.
       </p>
 
       {/* Inert while a save is in flight, so nothing edited then is lost when it completes. */}
@@ -174,6 +177,23 @@ function PolicySection() {
             id="access-tokens-enabled"
             checked={draft.enabled}
             onCheckedChange={(enabled) => edit({ ...draft, enabled })}
+          />
+        </div>
+
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <label htmlFor="hosted-mcp-enabled" className="text-sm font-medium text-foreground">
+              Allow MCP clients
+            </label>
+            <p className="text-xs text-muted-foreground">
+              Members connect an MCP client to <code>{HOSTED_MCP_URL}</code> with an access token.
+              Off refuses MCP; tokens keep working with the API.
+            </p>
+          </div>
+          <Switch
+            id="hosted-mcp-enabled"
+            checked={draft.mcpEnabled ?? true}
+            onCheckedChange={(mcpEnabled) => edit({ ...draft, mcpEnabled })}
           />
         </div>
 

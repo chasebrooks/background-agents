@@ -21,7 +21,7 @@ async function errorMessage(response: Response, fallback: string): Promise<strin
 async function fetchPolicy(): Promise<PersonalAccessTokenPolicySnapshot> {
   const response = await browserApiFetch(POLICY_KEY);
   if (!response.ok) {
-    throw new Error(await errorMessage(response, "Failed to load the access token policy"));
+    throw new Error(await errorMessage(response, "Failed to load the API policy"));
   }
   return personalAccessTokenPolicySnapshotSchema.parse(await response.json());
 }

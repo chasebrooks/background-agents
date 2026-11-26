@@ -205,6 +205,17 @@ export function unmetGrantPrerequisite(
   return null;
 }
 
+/** `permissions` plus the prerequisites each of them needs, in registry order. */
+export function withGrantPrerequisites<Permission extends PermissionId>(
+  permissions: readonly Permission[]
+): PermissionId[] {
+  const present = new Set<PermissionId>(permissions);
+  for (const permission of permissions) {
+    for (const prerequisite of prerequisitesOf(permission)) present.add(prerequisite);
+  }
+  return PERMISSION_IDS.filter((permission) => present.has(permission));
+}
+
 /** `permissions` less every permission whose prerequisites are not also present. */
 export function withGrantPrerequisitesMet<Permission extends PermissionId>(
   permissions: readonly Permission[]

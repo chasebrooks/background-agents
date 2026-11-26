@@ -194,6 +194,30 @@ export function personalAccessTokenPermissionLabel(permission: string): string {
   );
 }
 
+/**
+ * What handing work off to sessions takes: reading, starting, and prompting sessions on the
+ * repositories and environments one may use. The second choice an app is offered at sign-in.
+ */
+const HAND_OFF_PERMISSIONS: readonly PersonalAccessTokenGrantablePermission[] = [
+  "sessions.read",
+  "sessions.create",
+  "sessions.collaborate",
+  "repositories.read",
+  "repositories.use",
+  "environments.read",
+  "environments.use",
+];
+
+/** The hand-off choice: the read-only choice plus what handing off work takes, of `available`. */
+export function handOffPermissions(
+  available: readonly PersonalAccessTokenGrantablePermission[],
+  readOnly: readonly PersonalAccessTokenGrantablePermission[]
+): PersonalAccessTokenGrantablePermission[] {
+  return available.filter(
+    (permission) => readOnly.includes(permission) || HAND_OFF_PERMISSIONS.includes(permission)
+  );
+}
+
 /** The permissions in `available` that only read: Settings' read-only shortcut. */
 export function readOnlyPermissions(
   available: readonly PersonalAccessTokenGrantablePermission[]

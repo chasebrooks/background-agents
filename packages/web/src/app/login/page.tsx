@@ -9,6 +9,7 @@ import { ErrorBanner } from "@/components/ui/error-banner";
 import { AuthenticationUnavailableError } from "@/lib/authentication-unavailable-error";
 import { getServerAuthSession, type ServerAuthSession } from "@/lib/server-auth-session";
 import { getEnabledSignInProviders } from "@/lib/sign-in-providers";
+import { safeReturnTo } from "@/lib/sign-in-return-to";
 import { APP_NAME } from "@/lib/site-config";
 
 export const dynamic = "force-dynamic";
@@ -27,7 +28,7 @@ function LoginUnavailable() {
 }
 
 interface LoginPageProps {
-  searchParams: Promise<{ error?: string | string[] }>;
+  searchParams: Promise<{ error?: string | string[]; returnTo?: string | string[] }>;
 }
 
 const GENERIC_SIGN_IN_ERROR = "An error occurred during sign in. Please try again.";
@@ -59,7 +60,10 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
     if (error instanceof AuthenticationUnavailableError) return <LoginUnavailable />;
     throw error;
   }
-  if (session) redirect("/");
+  const { error, returnTo: requestedReturnTo } = await searchParams;
+  // Only a path on this app; anything else returns home, so this page is never an open redirect.
+  const returnTo = safeReturnTo(requestedReturnTo) ?? undefined;
+  if (session) redirect(returnTo ?? "/");
 
   let providers;
   try {
@@ -69,7 +73,6 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
     throw error;
   }
 
-  const { error } = await searchParams;
   return (
     <main className="min-h-screen flex flex-col items-center justify-center gap-8 px-6">
       <div className="space-y-3 text-center">
@@ -81,7 +84,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           {signInErrorMessage(error)}
         </ErrorBanner>
       )}
-      <SignInProviderButtons providers={providers} />
+      <SignInProviderButtons providers={providers} returnTo={returnTo} />
     </main>
   );
 }

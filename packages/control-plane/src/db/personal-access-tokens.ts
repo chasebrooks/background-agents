@@ -43,6 +43,32 @@ export interface PersonalAccessTokenCredential {
   readonly oauthClientId: string | null;
 }
 
+/** What makes an issue an OAuth token exchange: the client, and the code it is exchanged for. */
+export interface OAuthIssuance {
+  /** The client the token is issued to; recorded on the token. */
+  readonly clientId: string;
+  /**
+   * The hash of the authorization code being exchanged. The token is issued only while that code
+   * has issued nothing and has not been replayed, and the code then records the token.
+   */
+  readonly codeHash: string;
+  /**
+   * The owner's expired tokens from the same client, deleted before the new one is counted, so
+   * a client that signs in again every time its token expires never fills the per-user cap.
+   */
+  readonly expiredTokenIds: readonly string[];
+}
+
+/** An owner's token issued to one OAuth client, as pruning needs it. */
+export interface OAuthClientToken {
+  readonly id: string;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+}
+
+/** Why a token was revoked, when not by a person: recorded as the audit event's reason. */
+export type TokenRevocationReason = "oauth_code_replayed" | "oauth_expired_pruned";
+
 export interface IssuePersonalAccessTokenInput {
   readonly userId: string;
   readonly name: string;
@@ -56,12 +82,21 @@ export interface IssuePersonalAccessTokenInput {
    * token the new policy forbids.
    */
   readonly policyRevision?: number;
+  /**
+   * Set for a token issued through OAuth sign-in. Such a token is also issued only while its owner
+   * is not suspended.
+   */
+  readonly oauth?: OAuthIssuance;
 }
 
 export type IssuePersonalAccessTokenResult =
   | { kind: "issued"; token: CreatedPersonalAccessToken }
   | { kind: "limit_reached" }
-  | { kind: "policy_changed" };
+  | { kind: "policy_changed" }
+  /** OAuth only: the code has already issued a token, or was replayed. */
+  | { kind: "code_unavailable" }
+  /** OAuth only: the owner is suspended. */
+  | { kind: "user_inactive" };
 
 export interface RevokePersonalAccessTokenInput {
   /** The token's owner; a token id alone never selects another user's token. */
@@ -71,6 +106,8 @@ export interface RevokePersonalAccessTokenInput {
   readonly actorUserId: string;
   readonly now: number;
   readonly requestId: string;
+  /** Set when the system revoked it rather than a person; recorded on the audit event. */
+  readonly reason?: TokenRevocationReason;
 }
 
 interface TokenRow {
@@ -132,12 +169,13 @@ function toPersonalAccessToken(row: TokenRow, permissions: PermissionId[]): Pers
 }
 
 /** The audit snapshot of a token: everything but its secret and usage. */
-function auditSnapshot(token: PersonalAccessToken) {
+function auditSnapshot(token: PersonalAccessToken, oauthClientId: string | null = null) {
   return {
     name: token.name,
     displayPrefix: token.displayPrefix,
     permissions: token.permissions,
     expiresAt: token.expiresAt,
+    ...(oauthClientId === null ? {} : { oauthClientId }),
   };
 }
 
@@ -165,6 +203,7 @@ export class PersonalAccessTokenStore {
       token: plaintext,
     };
 
+    const oauth = input.oauth;
     const policyGuard =
       input.policyRevision === undefined
         ? ""
@@ -172,13 +211,30 @@ export class PersonalAccessTokenStore {
              AND EXISTS (
                SELECT 1 FROM workspace_personal_access_token_policy WHERE id = 1 AND revision = ?
              )`;
+    const oauthGuard =
+      oauth === undefined
+        ? ""
+        : `
+             AND EXISTS (
+               SELECT 1 FROM oauth_authorization_codes
+                WHERE code_hash = ? AND replayed_at IS NULL AND issued_token_id IS NULL
+             )
+             AND EXISTS (SELECT 1 FROM users WHERE id = ? AND suspended_at IS NULL)`;
+    // The client's expired tokens, as they stand now, for their pruning's audit events.
+    const expired =
+      oauth === undefined || oauth.expiredTokenIds.length === 0
+        ? []
+        : (await this.list(input.userId)).filter((t) => oauth.expiredTokenIds.includes(t.id));
     const statements = await this.db.batch([
+      ...(oauth === undefined ? [] : this.bindExpiredPruning(oauth, expired, input)),
       this.db
         .prepare(
           `INSERT INTO personal_access_tokens
-             (id, user_id, name, token_hash, display_prefix, created_at, last_used_at, expires_at)
-           SELECT ?, ?, ?, ?, ?, ?, NULL, ?
-           WHERE (SELECT COUNT(*) FROM personal_access_tokens WHERE user_id = ?) < ?${policyGuard}`
+             (id, user_id, name, token_hash, display_prefix, created_at, last_used_at, expires_at,
+              oauth_client_id)
+           SELECT ?, ?, ?, ?, ?, ?, NULL, ?, ?
+           WHERE (SELECT COUNT(*) FROM personal_access_tokens WHERE user_id = ?)
+                 < ?${policyGuard}${oauthGuard}`
         )
         .bind(
           token.id,
@@ -188,9 +244,11 @@ export class PersonalAccessTokenStore {
           token.displayPrefix,
           token.createdAt,
           token.expiresAt,
+          oauth?.clientId ?? null,
           input.userId,
           PERSONAL_ACCESS_TOKEN_MAX_PER_USER,
-          ...(input.policyRevision === undefined ? [] : [input.policyRevision])
+          ...(input.policyRevision === undefined ? [] : [input.policyRevision]),
+          ...(oauth === undefined ? [] : [oauth.codeHash, input.userId])
         ),
       ...token.permissions.map((permission) =>
         this.db
@@ -208,17 +266,96 @@ export class PersonalAccessTokenStore {
         requestId: input.requestId,
         now: input.now,
         before: {},
-        after: auditSnapshot(token),
+        after: auditSnapshot(token, oauth?.clientId),
       }),
+      ...(oauth === undefined ? [] : [this.bindCodeIssued(oauth, token.id)]),
       // Read in the same transaction, to tell a moved policy from the limit when nothing inserts.
-      this.db.prepare("SELECT revision FROM workspace_personal_access_token_policy WHERE id = 1"),
+      this.db
+        .prepare(
+          `SELECT
+           (SELECT revision FROM workspace_personal_access_token_policy WHERE id = 1) AS revision,
+           (SELECT COUNT(*) FROM oauth_authorization_codes
+             WHERE code_hash = ? AND replayed_at IS NULL AND issued_token_id IS NULL) AS code_open,
+           (SELECT COUNT(*) FROM users WHERE id = ? AND suspended_at IS NULL) AS user_active,
+           (SELECT COUNT(*) FROM personal_access_tokens WHERE id = ?) AS issued`
+        )
+        .bind(oauth?.codeHash ?? null, input.userId, token.id),
     ]);
-    const [inserted] = statements;
-    if (inserted.meta.changes === 1) return { kind: "issued", token };
-    const [policy] = statements[statements.length - 1].results as { revision: number }[];
-    return input.policyRevision !== undefined && policy?.revision !== input.policyRevision
-      ? { kind: "policy_changed" }
-      : { kind: "limit_reached" };
+    const [state] = statements[statements.length - 1].results as {
+      revision: number | null;
+      code_open: number;
+      user_active: number;
+      issued: number;
+    }[];
+    if (state.issued === 1) return { kind: "issued", token };
+    if (input.policyRevision !== undefined && state.revision !== input.policyRevision) {
+      return { kind: "policy_changed" };
+    }
+    if (oauth !== undefined && state.code_open === 0) return { kind: "code_unavailable" };
+    if (oauth !== undefined && state.user_active === 0) return { kind: "user_inactive" };
+    return { kind: "limit_reached" };
+  }
+
+  /** Records the new token on the code it was exchanged for, only if the token was inserted. */
+  private bindCodeIssued(oauth: OAuthIssuance, tokenId: string): SqlStatement {
+    return this.db
+      .prepare(
+        `UPDATE oauth_authorization_codes SET issued_token_id = ?
+          WHERE code_hash = ? AND EXISTS (SELECT 1 FROM personal_access_tokens WHERE id = ?)`
+      )
+      .bind(tokenId, oauth.codeHash, tokenId);
+  }
+
+  /**
+   * Deletes the owner's expired tokens from the issuing client, each with its audit event. Run
+   * ahead of the insert, so they no longer count against the cap; they could not be used anyway.
+   */
+  private bindExpiredPruning(
+    oauth: OAuthIssuance,
+    expired: readonly PersonalAccessToken[],
+    input: IssuePersonalAccessTokenInput
+  ): SqlStatement[] {
+    return expired.flatMap((token) => [
+      this.bindAudit({
+        action: "personal_access_token.revoked",
+        tokenId: token.id,
+        ownerUserId: input.userId,
+        actorUserId: input.userId,
+        requestId: input.requestId,
+        now: input.now,
+        before: auditSnapshot(token, oauth.clientId),
+        after: {},
+        reason: "oauth_expired_pruned",
+      }),
+      this.db
+        .prepare(
+          `DELETE FROM personal_access_tokens
+            WHERE id = ? AND user_id = ? AND oauth_client_id = ?`
+        )
+        .bind(token.id, input.userId, oauth.clientId),
+    ]);
+  }
+
+  /** The owner's tokens issued to one OAuth client, never another client's nor a Settings one. */
+  async listForOAuthClient(userId: string, clientId: string): Promise<OAuthClientToken[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT id, created_at, expires_at
+           FROM personal_access_tokens
+          WHERE user_id = ? AND oauth_client_id = ?
+          ORDER BY created_at DESC, id`
+      )
+      .bind(userId, clientId)
+      .all<{
+        id: string;
+        created_at: number;
+        expires_at: number;
+      }>();
+    return results.map((row) => ({
+      id: row.id,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+    }));
   }
 
   /** One user's tokens, newest first, with their grants. Never includes a secret. */
@@ -366,6 +503,7 @@ export class PersonalAccessTokenStore {
         now: input.now,
         before: auditSnapshot(existing),
         after: {},
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
       }),
       this.db
         .prepare("DELETE FROM personal_access_tokens WHERE id = ? AND user_id = ?")
@@ -444,6 +582,8 @@ export class PersonalAccessTokenStore {
     now: number;
     before: object;
     after: object;
+    /** The system's reason for a revocation; the audit reason code, and in its request. */
+    reason?: TokenRevocationReason;
   }): SqlStatement {
     return this.db
       .prepare(
@@ -462,8 +602,12 @@ export class PersonalAccessTokenStore {
         event.action,
         event.tokenId,
         event.ownerUserId,
-        event.action,
-        JSON.stringify({ before: event.before, requested: {}, after: event.after }),
+        event.reason ?? event.action,
+        JSON.stringify({
+          before: event.before,
+          requested: event.reason === undefined ? {} : { reason: event.reason },
+          after: event.after,
+        }),
         event.tokenId,
         event.ownerUserId
       );

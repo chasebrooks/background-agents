@@ -1,7 +1,8 @@
 /**
  * The hosted MCP server at `/mcp`.
  *
- * An MCP client connects with a personal access token as its bearer credential. The route itself
+ * An MCP client connects with a personal access token as its bearer credential: one its user created
+ * in Settings, or one issued to it by OAuth sign-in (see `./oauth`). The route itself
  * grants nothing: it checks the API policy's MCP switch, refuses browser origins it does not
  * know, and confirms the token is live, then serves the MCP exchange. Every tool call becomes a
  * request to the control plane's own router, made in-process and carrying the same token, so
@@ -25,6 +26,13 @@ import { McpError } from "../mcp/errors";
 import { readMcpBody } from "../mcp/relay";
 import { ControlPlaneClient, type ControlPlaneFetch } from "../mcp-tools/client";
 import { createHostedMcpServer } from "../mcp-tools/server";
+import {
+  availableOAuthEndpoints,
+  bearerChallenge,
+  readOnlyScopes,
+  type OAuthEndpoints,
+  type OAuthPolicy,
+} from "../oauth/server";
 import { admit, dispatch } from "../routing/admit";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
 import { logPrincipal } from "../routing/request-lifecycle";
@@ -64,9 +72,25 @@ function allowedOriginHostnames(env: Env): string[] {
   return hostnames;
 }
 
-function unauthorized(message: string): Response {
+/**
+ * The refusal of a request without a usable token. While sign-in is available its challenge points
+ * the client at the resource metadata and asks for read-only scopes, which is what starts an MCP
+ * client's OAuth sign-in.
+ */
+function unauthorized(
+  message: string,
+  endpoints: OAuthEndpoints | null,
+  policy: OAuthPolicy,
+  invalidToken: boolean
+): Response {
   const response = error(message, 401);
-  response.headers.set("WWW-Authenticate", 'Bearer realm="open-inspect"');
+  response.headers.set(
+    "WWW-Authenticate",
+    bearerChallenge(endpoints, {
+      ...(invalidToken ? { error: "invalid_token" as const } : {}),
+      scope: readOnlyScopes(policy),
+    })
+  );
   return response;
 }
 
@@ -181,6 +205,7 @@ async function serveMcp(
   // Off answers as though the route did not exist, before anything about the caller is checked.
   const policy = await new PersonalAccessTokenPolicyStore(ctx.db).get();
   if (!policy.mcpEnabled) return error("Not found", 404);
+  const endpoints = availableOAuthEndpoints(env, policy);
 
   // Compares hostnames only, as the SDK's check does: scheme and port are not considered.
   const rejectedOrigin = originValidationResponse(request, allowedOriginHostnames(env));
@@ -189,13 +214,15 @@ async function serveMcp(
   // Only a personal access token: a service signature acts for a service, not for one person.
   const token = readPersonalAccessToken(request.headers);
   if (token === null || request.headers.has(SERVICE_SIGNATURE_HEADER)) {
-    return unauthorized("A personal access token is required");
+    return unauthorized("A personal access token is required", endpoints, policy, false);
   }
   // Checked here as well as by every route a tool calls, so a revoked or expired token is told so
   // before the client lists tools it could not call.
   const auth = await authenticate(request, env, ctx);
   if (isAuthError(auth)) {
-    return auth.status === 401 ? unauthorized(auth.reason) : error(auth.reason, auth.status);
+    return auth.status === 401
+      ? unauthorized(auth.reason, endpoints, policy, true)
+      : error(auth.reason, auth.status);
   }
   logPrincipal(auth.principal, ctx, HOSTED_MCP_PATH);
   if (auth.principal.kind === "personal-access-token") {

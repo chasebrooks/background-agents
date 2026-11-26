@@ -6,6 +6,7 @@ import {
   isPersonalAccessTokenReadOnlyPermission,
   PERSONAL_ACCESS_TOKEN_PERMISSION_ACCESS,
   personalAccessTokenOAuthClientIds,
+  withGrantPrerequisites,
   PERSONAL_ACCESS_TOKEN_GRANT_PREREQUISITES,
   PERSONAL_ACCESS_TOKEN_GRANTABLE_PERMISSIONS,
   PERSONAL_ACCESS_TOKEN_MAX_LIFETIME_DAYS,
@@ -187,6 +188,18 @@ describe("read-only permissions", () => {
       const readShaped = permission.endsWith(".read") || permission === "sessions.export";
       expect(isPersonalAccessTokenReadOnlyPermission(permission), permission).toBe(readShaped);
     }
+  });
+});
+
+describe("withGrantPrerequisites", () => {
+  it("adds each permission's prerequisites, in registry order", () => {
+    expect(withGrantPrerequisites(["skills.manage", "sessions.collaborate"])).toEqual([
+      "sessions.collaborate",
+      "sessions.read",
+      "skills.manage",
+      "skills.read",
+    ]);
+    expect(withGrantPrerequisites(["analytics.read"])).toEqual(["analytics.read"]);
   });
 });
 

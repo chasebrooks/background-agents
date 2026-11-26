@@ -42,6 +42,8 @@ import type {
   SendPromptRequest,
 } from "@open-inspect/shared/types/session-api";
 import { sessionVisibilitySchema } from "@open-inspect/shared/types/teams";
+import { PERMISSION_IDS, type PermissionId } from "@open-inspect/shared/rbac";
+import type { PersonalAccessTokenGrantablePermission } from "@open-inspect/shared/types/personal-access-tokens";
 import { z } from "zod";
 import { ControlPlaneError, type ControlPlaneClient } from "./client";
 
@@ -71,6 +73,13 @@ export interface ToolDefinition {
   description: string;
   /** The grant a token needs for this tool, as the tool description states it. */
   requires: string;
+  /**
+   * The permissions a call with these arguments needs: what a client signed in with OAuth is asked
+   * to step up to when its token lacks them. Where `requires` offers alternatives that the
+   * arguments cannot decide (whose automation it is), this names the narrower one, and the route
+   * the tool calls names the other if it is the one needed.
+   */
+  scopesFor(args: unknown): readonly PermissionId[];
   /** Drives the MCP `readOnlyHint`, a hint a client may use to decide what to prompt for. */
   readOnly: boolean;
   /**
@@ -87,9 +96,17 @@ export interface ToolDefinition {
 /** A tool as it is written: its handler receives exactly what its schema produces. */
 interface ToolSpec<Shape extends z.ZodRawShape> extends Omit<
   ToolDefinition,
-  "inputSchema" | "run"
+  "inputSchema" | "run" | "scopesFor" | "requires"
 > {
   inputSchema: Shape;
+  /** The permissions every call needs. `requires` is written from these. */
+  scopes: readonly PersonalAccessTokenGrantablePermission[];
+  /** What else a call may need that the tool cannot know in advance, in words. */
+  alternatives?: string;
+  /** Further permissions a call needs for the targets its arguments name. */
+  targetScopes?(
+    args: z.output<z.ZodObject<Shape>>
+  ): readonly PersonalAccessTokenGrantablePermission[];
   run(client: ControlPlaneClient, args: z.output<z.ZodObject<Shape>>): Promise<unknown>;
 }
 
@@ -100,7 +117,42 @@ interface ToolSpec<Shape extends z.ZodRawShape> extends Omit<
  */
 function defineTool<const Shape extends z.ZodRawShape>(spec: ToolSpec<Shape>): ToolDefinition {
   const schema = z.object(spec.inputSchema);
-  return { ...spec, run: async (client, args) => spec.run(client, schema.parse(args)) };
+  const { scopes, targetScopes, alternatives, ...rest } = spec;
+  return {
+    ...rest,
+    requires: alternatives ? `${listed(scopes)}, plus ${alternatives}` : listed(scopes),
+    scopesFor: (args) => {
+      // Arguments that do not parse name no target; the call fails on them before any route.
+      const parsed = targetScopes ? schema.safeParse(args) : null;
+      return [...scopes, ...(parsed?.success ? targetScopes!(parsed.data) : [])];
+    },
+    run: async (client, args) => spec.run(client, schema.parse(args)),
+  };
+}
+
+/** Permissions as a sentence lists them: `a`, `a and b`, `a, b, and c`. */
+function listed(permissions: readonly string[]): string {
+  if (permissions.length <= 2) return permissions.join(" and ");
+  return `${permissions.slice(0, -1).join(", ")}, and ${permissions.at(-1)}`;
+}
+
+/** The read permissions the tools use: what a client signing in with OAuth is first asked for. */
+export function toolReadScopes(): PermissionId[] {
+  const reads = new Set(
+    TOOLS.filter((tool) => tool.readOnly).flatMap((tool) => [...tool.scopesFor({})])
+  );
+  return PERMISSION_IDS.filter((permission) => reads.has(permission));
+}
+
+/** The permission a target needs: using a repository, or an environment. */
+function targetUse(target: {
+  repository: boolean;
+  environment: boolean;
+}): PersonalAccessTokenGrantablePermission[] {
+  return [
+    ...(target.repository ? (["repositories.use"] as const) : []),
+    ...(target.environment ? (["environments.use"] as const) : []),
+  ];
 }
 
 const sessionId = z
@@ -236,7 +288,7 @@ const importRef = z
 export const TOOLS: ToolDefinition[] = [
   defineTool({
     name: "list_sessions",
-    requires: "sessions.read",
+    scopes: ["sessions.read"],
     title: "List sessions",
     readOnly: true,
     description:
@@ -259,7 +311,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "get_session",
-    requires: "sessions.read",
+    scopes: ["sessions.read"],
     title: "Read a session's state",
     readOnly: true,
     description:
@@ -280,7 +332,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "get_session_events",
-    requires: "sessions.read",
+    scopes: ["sessions.read"],
     title: "Read a session timeline",
     readOnly: true,
     description:
@@ -299,7 +351,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "get_session_messages",
-    requires: "sessions.read",
+    scopes: ["sessions.read"],
     title: "Read session messages",
     readOnly: true,
     description:
@@ -318,7 +370,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "get_session_diff",
-    requires: "sessions.read",
+    scopes: ["sessions.read"],
     title: "List a session's changed files",
     readOnly: true,
     description:
@@ -331,7 +383,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "get_session_diff_file",
-    requires: "sessions.read",
+    scopes: ["sessions.read"],
     title: "Read one file's patch",
     readOnly: true,
     description:
@@ -357,9 +409,13 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "create_session",
-    requires:
-      "sessions.create, sessions.read, and sessions.collaborate, plus repositories.use or " +
-      "environments.use for its target",
+    scopes: ["sessions.create", "sessions.read", "sessions.collaborate"],
+    alternatives: "repositories.use or environments.use for its target",
+    targetScopes: (args) =>
+      targetUse({
+        repository: args.repo_owner !== undefined,
+        environment: args.environment_id !== undefined,
+      }),
     title: "Start a session",
     readOnly: false,
     description:
@@ -458,7 +514,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "send_prompt",
-    requires: "sessions.read and sessions.collaborate",
+    scopes: ["sessions.read", "sessions.collaborate"],
     title: "Send a prompt to a session",
     readOnly: false,
     description:
@@ -488,7 +544,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "list_automations",
-    requires: "automations.read",
+    scopes: ["automations.read"],
     title: "List automations",
     readOnly: true,
     description:
@@ -535,7 +591,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "list_automation_invocations",
-    requires: "automations.read",
+    scopes: ["automations.read"],
     title: "List automation invocations",
     readOnly: true,
     description:
@@ -554,7 +610,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "get_automation_run",
-    requires: "automations.read",
+    scopes: ["automations.read"],
     title: "Read one automation run",
     readOnly: true,
     description:
@@ -579,8 +635,13 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "create_automation",
-    requires:
-      "automations.create and sessions.create, plus repositories.use or environments.use for its targets",
+    scopes: ["automations.create", "sessions.create"],
+    alternatives: "repositories.use or environments.use for its targets",
+    targetScopes: (args) =>
+      targetUse({
+        repository: (args.repositories?.length ?? 0) > 0,
+        environment: (args.environment_ids?.length ?? 0) > 0,
+      }),
     title: "Create an automation",
     readOnly: false,
     description:
@@ -725,9 +786,10 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "trigger_automation",
-    requires:
-      "automations.trigger.own for automations you run, or automations.trigger.any, plus " +
-      "sessions.create, and repositories.use or environments.use for its targets",
+    scopes: ["automations.trigger.own", "sessions.create"],
+    alternatives:
+      "automations.trigger.any in place of automations.trigger.own for an automation you do not " +
+      "run, and repositories.use or environments.use for its targets",
     title: "Run an automation now",
     readOnly: false,
     description:
@@ -745,7 +807,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "list_skills",
-    requires: "skills.read",
+    scopes: ["skills.read"],
     title: "List managed skills",
     readOnly: true,
     description:
@@ -764,7 +826,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "import_skill_from_git",
-    requires: "skills.read and skills.manage",
+    scopes: ["skills.read", "skills.manage"],
     title: "Create a skill from a repository",
     readOnly: false,
     description:
@@ -834,7 +896,7 @@ export const TOOLS: ToolDefinition[] = [
   }),
   defineTool({
     name: "update_skill_from_git",
-    requires: "skills.read and skills.manage",
+    scopes: ["skills.read", "skills.manage"],
     title: "Update a skill from its repository",
     readOnly: false,
     // Not additive: this moves the skill's current revision, and that is what

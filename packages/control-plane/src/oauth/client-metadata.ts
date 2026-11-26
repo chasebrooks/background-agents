@@ -22,6 +22,9 @@ const clientMetadataSchema = z.object({
   client_name: z.unknown().optional(),
   redirect_uris: z.array(z.string()).min(1),
   token_endpoint_auth_method: z.string().optional(),
+  token_endpoint_auth_methods_supported: z.array(z.string()).optional(),
+  client_secret: z.unknown().optional(),
+  client_secret_expires_at: z.unknown().optional(),
   grant_types: z.array(z.string()).optional(),
   response_types: z.array(z.string()).optional(),
 });
@@ -47,6 +50,27 @@ function displayableName(value: unknown): string | null {
 }
 
 export class ClientMetadataError extends Error {}
+
+/**
+ * Whether a document lets its client authenticate at the token endpoint with `none`, the only
+ * method this server accepts. Per the client ID metadata document draft (-03, section 5): the
+ * plural `token_endpoint_auth_methods_supported` is what a client should send and must be honoured
+ * when present; the singular `token_endpoint_auth_method` may be read only when the plural is
+ * absent, and must then be among the plural's values if both appear; `none` is assumed only when
+ * neither is present (never the RFC 7591 default of `client_secret_basic`). A document may not
+ * carry a client secret at all.
+ */
+function usesNoClientAuthentication(document: z.infer<typeof clientMetadataSchema>): boolean {
+  if (document.client_secret !== undefined || document.client_secret_expires_at !== undefined) {
+    return false;
+  }
+  const plural = document.token_endpoint_auth_methods_supported;
+  const singular = document.token_endpoint_auth_method;
+  if (plural !== undefined) {
+    return plural.includes("none") && (singular === undefined || plural.includes(singular));
+  }
+  return (singular ?? "none") === "none";
+}
 
 /** Fetches with the platform's `fetch` unless a test supplies another. */
 export type ClientMetadataFetch = (request: Request) => Promise<Response>;
@@ -89,7 +113,7 @@ export async function fetchClientMetadata(
     throw new ClientMetadataError("The app's metadata document names a different app");
   }
   // This server issues tokens to public clients only, which prove possession with PKCE.
-  if ((parsed.token_endpoint_auth_method ?? "none") !== "none") {
+  if (!usesNoClientAuthentication(parsed)) {
     throw new ClientMetadataError("The app authenticates in a way this server does not support");
   }
   if (parsed.grant_types && !parsed.grant_types.includes("authorization_code")) {

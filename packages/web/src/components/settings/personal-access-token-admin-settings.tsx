@@ -117,6 +117,10 @@ function PolicySection() {
     draft: PersonalAccessTokenPolicy;
   } | null>(null);
   const [saving, setSaving] = useState(false);
+  // The client list as typed while it is being edited, so a half-typed line is not reformatted
+  // under the cursor; null shows the draft's list. Cleared with every edit, so a discarded,
+  // superseded, or saved list never lingers in the box.
+  const [clientIdsText, setClientIdsText] = useState<string | null>(null);
   const dirty = editing !== null && !samePolicy(editing.draft, rulesOf(editing.base));
 
   // A policy edit is easy to lose and decides what every member's tokens can do, so leaving with
@@ -139,6 +143,11 @@ function PolicySection() {
     setEditing((current) => ({ base: current?.base ?? loaded, draft: next }));
   }
 
+  function resetEdits() {
+    setEditing(null);
+    setClientIdsText(null);
+  }
+
   async function save() {
     if (!editing) return;
     if (editing.draft.enabled && editing.draft.allowedPermissions?.length === 0) {
@@ -158,13 +167,13 @@ function PolicySection() {
       );
       if (result.status === "conflict") {
         // Show the policy someone else saved, rather than let a second save overwrite it unseen.
-        setEditing(null);
+        resetEdits();
         await mutate();
         toast.error("Someone else changed the policy. Review it, then make your changes again.");
         return;
       }
       await mutate(result.policy, { revalidate: false });
-      setEditing(null);
+      resetEdits();
       toast.success("API policy saved");
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Failed to save the policy");
@@ -234,7 +243,9 @@ function PolicySection() {
         {draft.mcpEnabled !== undefined && draft.oauthClientIds !== undefined && (
           <OAuthClientsField
             clientIds={draft.oauthClientIds}
+            text={clientIdsText}
             disabled={!draft.mcpEnabled}
+            onTextChange={setClientIdsText}
             onChange={(oauthClientIds) => edit({ ...draft, oauthClientIds })}
           />
         )}
@@ -303,7 +314,7 @@ function PolicySection() {
             {saving ? "Saving..." : "Save policy"}
           </Button>
           {dirty && (
-            <Button size="sm" variant="outline" onClick={() => setEditing(null)}>
+            <Button size="sm" variant="outline" onClick={resetEdits}>
               Discard changes
             </Button>
           )}
@@ -319,15 +330,19 @@ function PolicySection() {
  */
 function OAuthClientsField({
   clientIds,
+  text: typed,
   disabled,
+  onTextChange,
   onChange,
 }: {
   clientIds: string[] | null;
+  /** The list as typed, or null to show `clientIds` (the defaults when that is null). */
+  text: string | null;
   disabled: boolean;
+  onTextChange: (text: string) => void;
   onChange: (clientIds: string[] | null) => void;
 }) {
-  // The text as typed, so a half-typed line is not reformatted under the cursor.
-  const [text, setText] = useState(() => (clientIds ?? DEFAULT_OAUTH_CLIENT_IDS).join("\n"));
+  const text = typed ?? (clientIds ?? DEFAULT_OAUTH_CLIENT_IDS).join("\n");
   return (
     <fieldset disabled={disabled}>
       <legend className="text-sm font-medium text-foreground">Apps that can sign in</legend>
@@ -361,7 +376,7 @@ function OAuthClientsField({
             rows={4}
             value={text}
             onChange={(event) => {
-              setText(event.target.value);
+              onTextChange(event.target.value);
               onChange(parseOAuthClientIds(event.target.value));
             }}
           />

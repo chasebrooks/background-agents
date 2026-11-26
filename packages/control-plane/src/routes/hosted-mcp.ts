@@ -122,14 +122,18 @@ async function stepUpChallenge(
   principal: PersonalAccessTokenPrincipal,
   endpoints: OAuthEndpoints | null,
   policy: OAuthPolicy,
-  ctx: RequestContext
+  ctx: RequestContext,
+  client: ControlPlaneClient
 ): Promise<Response | null> {
   if (endpoints === null || principal.oauthClientId === undefined) return null;
   const call = toolCallOf(message);
   if (call === null) return null;
   const tool = TOOLS.find((candidate) => candidate.name === call.name);
   if (!tool) return null;
-  const needed = tool.scopesFor(call.arguments);
+  const needed = [
+    ...tool.scopesFor(call.arguments),
+    ...((await tool.resolveScopes?.(client, call.arguments)) ?? []),
+  ];
   const missing = needed.filter((permission) => !principal.grant.includes(permission));
   if (missing.length === 0) return null;
   let held: readonly PermissionId[];
@@ -312,10 +316,6 @@ async function serveMcp(
     const read = await readMessage(request);
     if (read instanceof Response) return read;
     parsedBody = read.message;
-    if (auth.principal.kind === "personal-access-token") {
-      const challenge = await stepUpChallenge(parsedBody, auth.principal, endpoints, policy, ctx);
-      if (challenge) return challenge;
-    }
   }
 
   const exchange: ExchangeContext = {
@@ -325,6 +325,17 @@ async function serveMcp(
       fetch: routerTransport(inProcessFetch, ctx.trace_id),
     }),
   };
+  if (parsedBody !== undefined && auth.principal.kind === "personal-access-token") {
+    const challenge = await stepUpChallenge(
+      parsedBody,
+      auth.principal,
+      endpoints,
+      policy,
+      ctx,
+      exchange.client
+    );
+    if (challenge) return challenge;
+  }
   return mcpHandler.fetch(request, {
     authInfo: { token, clientId: "personal-access-token", scopes: [], extra: { ...exchange } },
     ...(parsedBody === undefined ? {} : { parsedBody }),

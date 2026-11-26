@@ -39,7 +39,7 @@ A token an app receives by signing in is an ordinary token: the lifetime cap and
 
 OAuth sign-in uses both public URLs: the web app's origin is the issuer, which serves `/.well-known/oauth-authorization-server`, the consent page at `/oauth/authorize`, and the token endpoint at `/oauth/token`, and the control plane serves the MCP server and its `/.well-known/oauth-protected-resource/mcp`. Sign-in is unavailable unless the control plane knows both (`WEB_APP_URL` and `WORKER_URL`).
 
-Hosted Claude apps fetch these from Anthropic's servers, not the member's browser. Anything in front of the web app that challenges unauthenticated requests, such as Vercel deployment protection or Cloudflare Access, breaks sign-in; leave the metadata and token paths reachable, and allow Anthropic's published outbound range (`160.79.104.0/21`) through any firewall.
+Hosted Claude apps fetch these from Anthropic's servers, not the member's browser. Anything in front of the web app that challenges unauthenticated requests, such as Vercel deployment protection or Cloudflare Access, breaks sign-in; leave the metadata and token paths reachable, and allow Anthropic's outbound addresses through any firewall. Anthropic publishes them on its [IP addresses page](https://platform.claude.com/docs/en/api/ip-addresses) and says they will not change without notice; when this page was written they were the IPv4 ranges `160.79.104.0/21` and `153.61.208.0/20`.
 
 Turning tokens off is the fastest response to a suspected leak when you do not know which token leaked. Every policy change is recorded in the [audit log](/administration/audit-log) with the settings before and after, and saving refuses to overwrite a change someone else made since you loaded the page.
 

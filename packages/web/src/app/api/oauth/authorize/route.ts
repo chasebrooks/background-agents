@@ -19,7 +19,16 @@ export async function POST(request: Request): Promise<NextResponse> {
       { status: 403, headers: PRIVATE_NO_STORE_HEADERS }
     );
   }
-  const bytes = await readBodyCapped(request.body, MAX_APPROVAL_BYTES);
+  let bytes: Uint8Array | null;
+  try {
+    bytes = await readBodyCapped(request.body, MAX_APPROVAL_BYTES);
+  } catch {
+    // A body that broke off is never forwarded in part.
+    return NextResponse.json(
+      { error: "The approval could not be read; try again" },
+      { status: 400, headers: PRIVATE_NO_STORE_HEADERS }
+    );
+  }
   if (bytes === null) {
     return NextResponse.json(
       { error: "The approval is too large" },

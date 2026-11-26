@@ -36,7 +36,7 @@ import {
 } from "../auth/personal-access-token-issuance";
 import { OAuthAuthorizationCodeStore } from "../db/oauth-authorization-codes";
 import { PersonalAccessTokenPolicyStore } from "../db/personal-access-token-policy";
-import { PersonalAccessTokenStore } from "../db/personal-access-tokens";
+import { PersonalAccessTokenStore, type OwnedToken } from "../db/personal-access-tokens";
 import type { SqlDatabase } from "../db/sql-database";
 import { MS_PER_DAY } from "../db/utc-day";
 import {
@@ -239,12 +239,19 @@ function tokenName(clientId: string, clientName: string | null): string {
  */
 export const STEP_UP_REPLACEMENT_WINDOW_MS = 15 * 60 * 1000;
 
-/** The user's tokens from a client that bear on a new sign-in: one to replace, and expired ones. */
+/** The user's tokens as a new sign-in from a client sees them, read in one snapshot. */
 interface ClientTokens {
-  /** The live token `/mcp` most recently asked to step up, within the window; else null. */
-  readonly stepUp: string | null;
-  /** Tokens past their effective expiry: pruned when the new token is issued. */
+  /**
+   * The token a step-up from this client replaces: the one live token of the client's that
+   * `/mcp` asked to step up within the window. OAuth carries nothing from the challenge to the
+   * sign-in it starts, so when two or more were asked (two devices refused at once), which one is
+   * signing in is unknown, and none is replaced.
+   */
+  readonly stepUp: OwnedToken | null;
+  /** The client's tokens past their effective expiry: pruned when the new token is issued. */
   readonly expiredIds: string[];
+  /** Every token the user holds, in the same snapshot. */
+  readonly held: number;
 }
 
 async function clientTokens(
@@ -254,18 +261,20 @@ async function clientTokens(
   policy: PersonalAccessTokenPolicySnapshot,
   now: number
 ): Promise<ClientTokens> {
-  const tokens = await new PersonalAccessTokenStore(db).listForOAuthClient(userId, clientId);
-  const live = tokens.filter((token) => personalAccessTokenEffectiveExpiry(token, policy) > now);
-  const asked = live
-    .filter(
-      (token) =>
-        token.stepUpRequestedAt !== null &&
-        now - token.stepUpRequestedAt <= STEP_UP_REPLACEMENT_WINDOW_MS
-    )
-    .sort((a, b) => (b.stepUpRequestedAt ?? 0) - (a.stepUpRequestedAt ?? 0));
+  const owned = await new PersonalAccessTokenStore(db).listOwned(userId);
+  const fromClient = owned.filter((token) => token.oauthClientId === clientId);
+  const live = fromClient.filter(
+    (token) => personalAccessTokenEffectiveExpiry(token, policy) > now
+  );
+  const asked = live.filter(
+    (token) =>
+      token.stepUpRequestedAt !== null &&
+      now - token.stepUpRequestedAt <= STEP_UP_REPLACEMENT_WINDOW_MS
+  );
   return {
-    stepUp: asked[0]?.id ?? null,
-    expiredIds: tokens.filter((token) => !live.includes(token)).map((token) => token.id),
+    stepUp: asked.length === 1 ? asked[0] : null,
+    expiredIds: fromClient.filter((token) => !live.includes(token)).map((token) => token.id),
+    held: owned.length,
   };
 }
 
@@ -285,19 +294,13 @@ export async function describeAuthorizationRequest(
   const verification = await verifyRequest(params, user, env, db, fetcher);
   if (verification.kind !== "verified") return verification;
   const { request } = verification;
-  const { stepUp } = await clientTokens(
+  const { stepUp: replaces } = await clientTokens(
     db,
     user.userId,
     request.clientId,
     request.policy,
     Date.now()
   );
-  const replaces =
-    stepUp === null
-      ? null
-      : ((await new PersonalAccessTokenStore(db).list(user.userId)).find(
-          (token) => token.id === stepUp
-        ) ?? null);
   return {
     kind: "consent",
     client: {
@@ -377,15 +380,13 @@ export async function approveAuthorizationRequest(
   if (refusal) return { kind: "refused", refusal };
 
   const now = Date.now();
-  const { stepUp, expiredIds } = await clientTokens(
-    db,
-    user.userId,
-    request.clientId,
-    request.policy,
-    now
-  );
+  const {
+    stepUp,
+    expiredIds,
+    held: holding,
+  } = await clientTokens(db, user.userId, request.clientId, request.policy, now);
   // A grant of reads alone is not a step-up, even on the sign-in a challenge started.
-  const replaces = writes(input.permissions) ? stepUp : null;
+  const replaces = writes(input.permissions) ? (stepUp?.id ?? null) : null;
   if (input.replacesTokenId !== replaces) {
     return {
       kind: "refused",
@@ -399,11 +400,8 @@ export async function approveAuthorizationRequest(
       },
     };
   }
-  // Expired tokens from this client are pruned at issue, so they do not count here either.
-  const held =
-    (await new PersonalAccessTokenStore(db).list(user.userId)).length -
-    (replaces === null ? 0 : 1) -
-    expiredIds.length;
+  // What issue revokes does not count, and both come from one snapshot of the user's tokens.
+  const held = holding - (replaces === null ? 0 : 1) - expiredIds.length;
   if (held >= PERSONAL_ACCESS_TOKEN_MAX_PER_USER) {
     return { kind: "refused", refusal: TOKEN_LIMIT_REACHED };
   }

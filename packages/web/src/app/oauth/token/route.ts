@@ -33,6 +33,10 @@ const limiter = new FixedWindowRateLimiter(
   TOKEN_RATE_LIMIT_WINDOW_SECONDS * 1000
 );
 
+/** What a client is told when the exchange's outcome is unknown. */
+const RESTART_AUTHORIZATION =
+  "The token request did not complete. If no token was received, start authorization again; do not retry this code.";
+
 function oauthError(error: string, description: string, status = 400): Response {
   return Response.json(
     { error, error_description: description },
@@ -64,7 +68,13 @@ export async function POST(request: Request): Promise<Response> {
   if (contentType !== "application/x-www-form-urlencoded") {
     return oauthError("invalid_request", "The request must be form-encoded");
   }
-  const bytes = await readBodyCapped(request.body, MAX_TOKEN_REQUEST_BYTES);
+  let bytes: Uint8Array | null;
+  try {
+    bytes = await readBodyCapped(request.body, MAX_TOKEN_REQUEST_BYTES);
+  } catch {
+    // A body that broke off is never forwarded in part.
+    return oauthError("invalid_request", "The request could not be read");
+  }
   if (bytes === null) return oauthError("invalid_request", "The request is too large");
   const form = new URLSearchParams(new TextDecoder().decode(bytes));
   const fields: Record<string, string> = {};
@@ -78,7 +88,9 @@ export async function POST(request: Request): Promise<Response> {
       await forwardToControlPlane("POST", "/internal/oauth/token", JSON.stringify(fields))
     );
   } catch {
-    return oauthError("temporarily_unavailable", "The token could not be issued; try again", 503);
+    // The control plane may have spent the code before the answer was lost, and presenting a
+    // spent code again revokes the token it issued: the client must start over, not retry.
+    return oauthError("temporarily_unavailable", RESTART_AUTHORIZATION, 503);
   }
 }
 

@@ -107,6 +107,15 @@ describe("the OAuth consent page", () => {
     expect(mocks.redirect).toHaveBeenCalledWith("https://claude.ai/cb?error=invalid_request");
   });
 
+  it("refuses a request too long to survive signing in, before anything else", async () => {
+    // Within each parameter's own limit, but longer than sign-in can return to once encoded.
+    mocks.getServerAuthSession.mockResolvedValue(null);
+    render(await page({ ...REQUEST, state: "/".repeat(3000) }));
+    expect(screen.getByRole("alert")).toHaveTextContent("too long");
+    expect(mocks.redirect).not.toHaveBeenCalled();
+    expect(mocks.controlPlaneUserFetch).not.toHaveBeenCalled();
+  });
+
   it("refuses a request that repeats a parameter", async () => {
     render(await page({ ...REQUEST, redirect_uri: ["https://a.example", "https://b.example"] }));
     expect(screen.getByRole("alert")).toHaveTextContent("not valid");

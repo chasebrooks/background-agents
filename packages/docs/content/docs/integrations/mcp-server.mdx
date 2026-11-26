@@ -42,7 +42,7 @@ Then choose how long the connection lasts, up to your workspace's lifetime cap, 
 
 The token works wherever a personal access token does, not only at `/mcp`: the app could call the API directly with it, within the same grant.
 
-When a read-only connection tries something it isn't allowed to do, such as sending a prompt, and you could grant it, the client asks you to sign in again for more access, with the extra permissions selected. If you approve within 15 minutes with any write permission, the new token replaces the one that was refused, and the page says which. Choosing **Read only** replaces nothing. Tokens on your other devices are untouched: only the device that was refused gets a new token.
+When a read-only connection tries something it isn't allowed to do, such as sending a prompt, and you could grant it, the client asks you to sign in again for more access, with the extra permissions selected. If you approve within 15 minutes with any write permission, the new token replaces the one that was refused, and the page says which. Choosing **Read only** replaces nothing. Tokens on your other devices are untouched. If more than one of your devices was refused in that time, OpenInspect cannot tell which one is signing in, so it replaces none of them; revoke the old ones under **Settings › Access tokens** if you no longer need them.
 
 Only apps your workspace allows can sign in. By default these are Claude's apps; an administrator can change the list under **Settings › API policy**.
 

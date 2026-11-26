@@ -92,7 +92,10 @@ export const oauthConsentResponseSchema = z.discriminatedUnion("kind", [
     maxLifetimeDays: z.number().int(),
     /**
      * The token `/mcp` just asked this client to step up from, which approving with any write
-     * permission replaces. Approving with reads alone replaces nothing.
+     * permission replaces: set only when exactly one of the user's live tokens from this client was
+     * asked within the window. OAuth carries nothing from the challenge to this sign-in, so with
+     * two or more asked it is unknown which is signing in, and none is replaced. Approving with
+     * reads alone replaces nothing.
      */
     replaces: oauthReplacedTokenSchema.nullable(),
     /** Where declining sends the user: the client's redirect URI with `access_denied`. */

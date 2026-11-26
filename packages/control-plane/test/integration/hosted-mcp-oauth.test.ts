@@ -17,10 +17,12 @@ import type {
 import type { PersonalAccessTokenPolicy } from "@open-inspect/shared/types/personal-access-tokens";
 import { hashToken } from "../../src/auth/crypto";
 import { OAuthAuthorizationCodeStore } from "../../src/db/oauth-authorization-codes";
+import { AutomationStore } from "../../src/db/automation-store";
 import { PersonalAccessTokenStore } from "../../src/db/personal-access-tokens";
 import { STEP_UP_REPLACEMENT_WINDOW_MS } from "../../src/oauth/authorization";
 import { s256CodeChallenge } from "../../src/oauth/pkce";
 import { TEST_CLIENT_ORIGIN } from "../fixtures/oauth-client-metadata";
+import { makeAutomation } from "./invocation-fixtures";
 import { cleanD1Tables } from "./cleanup";
 import {
   initSession,
@@ -233,6 +235,13 @@ async function tokenRows(userId = OWNER) {
     .bind(userId)
     .all<{ id: string; name: string; oauth_client_id: string | null }>();
   return results;
+}
+
+/** The row id of a token just issued, found by the token itself, never by position. */
+async function rowIdOf(token: string): Promise<string> {
+  const found = await new PersonalAccessTokenStore(env.DB).findByToken(token);
+  if (!found) throw new Error("token not found");
+  return found.id;
 }
 
 async function pastedToken(permissions: PermissionId[]): Promise<string> {
@@ -733,14 +742,13 @@ describe("OAuth sign-in", () => {
 
   it("prunes the client's expired tokens, so they never fill the cap", async () => {
     const expired = await signIn(["sessions.read"]);
-    const [expiredRow] = await tokenRows();
+    const expiredRow = { id: await rowIdOf(expired) };
     await env.DB.prepare("UPDATE personal_access_tokens SET expires_at = ? WHERE id = ?")
       .bind(Date.now() - 1, expiredRow.id)
       .run();
     // Expired tokens of another client, and one made in Settings, are not this client's to prune.
-    await signIn(["sessions.read"], CLAUDE_CODE);
-    await pastedToken(["sessions.read"]);
-    const [, otherClient, settings] = await tokenRows();
+    const otherClient = { id: await rowIdOf(await signIn(["sessions.read"], CLAUDE_CODE)) };
+    const settings = { id: await rowIdOf(await pastedToken(["sessions.read"])) };
     await env.DB.prepare("UPDATE personal_access_tokens SET expires_at = ? WHERE id IN (?, ?)")
       .bind(Date.now() - 1, otherClient.id, settings.id)
       .run();
@@ -765,6 +773,31 @@ describe("OAuth sign-in", () => {
       (await controlPlane("/sessions", { headers: { Authorization: `Bearer ${token}` } })).status;
     expect(await live(expired)).toBe(401);
     expect(await live(fresh)).toBe(200);
+  });
+
+  it("prunes nothing when the issue it belongs to fails", async () => {
+    const expired = await signIn(["sessions.read"]);
+    const expiredId = await rowIdOf(expired);
+    await env.DB.prepare("UPDATE personal_access_tokens SET expires_at = ? WHERE id = ?")
+      .bind(Date.now() - 1, expiredId)
+      .run();
+    const { request, verifier } = await authorizationRequest();
+    const code = await approvedCode(request);
+    // The policy moves between approval and exchange, so the insert is refused.
+    await setPolicy({ maxLifetimeDays: 90 });
+    const response = await exchange({
+      grant_type: "authorization_code",
+      code,
+      code_verifier: verifier,
+      client_id: CLAUDE,
+      redirect_uri: CLAUDE_CALLBACK,
+    });
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_grant" });
+    expect((await tokenRows()).map((row) => row.id)).toEqual([expiredId]);
+    const pruned = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM authorization_audit_events WHERE action = 'personal_access_token.revoked'"
+    ).first<{ count: number }>();
+    expect(pruned?.count).toBe(0);
   });
 
   it("refuses an expired code", async () => {
@@ -928,7 +961,8 @@ describe("OAuth step-up", () => {
     const deviceB = await signIn(["sessions.read"], CLAUDE_CODE);
     const claude = await signIn(["sessions.read"]);
     const pasted = await pastedToken(["sessions.read"]);
-    const [rowA, rowB] = await tokenRows();
+    const rowA = { id: await rowIdOf(deviceA) };
+    const rowB = { id: await rowIdOf(deviceB) };
     // B was used last, so "most recently used" would pick B; only the challenge decides.
     await env.DB.prepare("UPDATE personal_access_tokens SET last_used_at = ? WHERE id = ?")
       .bind(Date.now() + 60_000, rowB.id)
@@ -977,7 +1011,7 @@ describe("OAuth step-up", () => {
   it("replaces nothing when no token was asked to step up, or the user grants reads alone", async () => {
     const { sessionName } = await initSession({ userId: OWNER });
     const first = await signIn(["sessions.read"]);
-    const [row] = await tokenRows();
+    const row = { id: await rowIdOf(first) };
     const stepUpRequest = async () =>
       (await authorizationRequest({ scope: "sessions.read sessions.collaborate" })).request;
 
@@ -1015,7 +1049,8 @@ describe("OAuth step-up", () => {
   it("never replaces a token made in Settings or another client's, whatever it is asked", async () => {
     const pasted = await pastedToken(["sessions.read"]);
     const otherClient = await signIn(["sessions.read"], CLAUDE_CODE);
-    const [pastedRow, otherRow] = await tokenRows();
+    const pastedRow = { id: await rowIdOf(pasted) };
+    const otherRow = { id: await rowIdOf(otherClient) };
     const store = new PersonalAccessTokenStore(env.DB);
     for (const target of [pastedRow.id, otherRow.id]) {
       const { request } = await authorizationRequest();
@@ -1040,6 +1075,114 @@ describe("OAuth step-up", () => {
       (await controlPlane("/sessions", { headers: { Authorization: `Bearer ${token}` } })).status;
     expect(await live(pasted)).toBe(200);
     expect(await live(otherClient)).toBe(200);
+    // Nothing was recorded as revoked either.
+    const revoked = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM authorization_audit_events WHERE action = 'personal_access_token.revoked'"
+    ).first<{ count: number }>();
+    expect(revoked?.count).toBe(0);
+  });
+
+  it("does not let an ineligible replacement free a place under the cap", async () => {
+    const settings = await pastedToken(["sessions.read"]);
+    for (let index = 0; index < 49; index++) await pastedToken(["sessions.read"]);
+    // Approval refuses at the cap, so the code an exchange would present is written directly.
+    const codeHash = await hashToken("at-the-cap");
+    await env.DB.prepare(
+      `INSERT INTO oauth_authorization_codes
+         (code_hash, user_id, client_id, redirect_uri, code_challenge, resource, permissions_json,
+          expires_in_days, token_name, policy_revision, created_at, expires_at)
+       VALUES (?, ?, ?, ?, 'x', ?, '["sessions.read"]', 1, 'x', 0, ?, ?)`
+    )
+      .bind(codeHash, OWNER, CLAUDE, CLAUDE_CALLBACK, RESOURCE, Date.now(), Date.now() + 60_000)
+      .run();
+    const issued = await new PersonalAccessTokenStore(env.DB).issue({
+      userId: OWNER,
+      name: "step-up",
+      permissions: ["sessions.read"],
+      expiresAt: Date.now() + 60_000,
+      now: Date.now(),
+      requestId: "integration",
+      oauth: {
+        clientId: CLAUDE,
+        codeHash,
+        replacesTokenId: await rowIdOf(settings),
+        expiredTokenIds: [],
+      },
+    });
+    // The Settings token is not the client's to replace, so it still counts, and stays.
+    expect(issued.kind).toBe("limit_reached");
+    expect(await tokenRows()).toHaveLength(50);
+    expect((await tokenRows()).map((row) => row.id)).toContain(await rowIdOf(settings));
+  });
+
+  it("replaces none when more than one of the client's tokens was asked to step up", async () => {
+    const { sessionName } = await initSession({ userId: OWNER });
+    const deviceA = await signIn(["sessions.read"], CLAUDE_CODE);
+    const deviceB = await signIn(["sessions.read"], CLAUDE_CODE);
+    for (const token of [deviceA, deviceB]) {
+      const refused = await callTool(token, "send_prompt", {
+        session_id: sessionName,
+        content: "x",
+      });
+      expect(refused.status).toBe(403);
+    }
+    // Nothing tells the sign-in which device is asking, so it replaces neither.
+    const { request, verifier } = await authorizationRequest({
+      client_id: CLAUDE_CODE,
+      redirect_uri: "http://127.0.0.1:43123/callback",
+      scope: "sessions.read sessions.collaborate",
+    });
+    await expect(check(request)).resolves.toMatchObject({ kind: "consent", replaces: null });
+    await tokenFor(request, verifier, ["sessions.read", "sessions.collaborate"], null);
+    const live = async (token: string) =>
+      (await controlPlane("/sessions", { headers: { Authorization: `Bearer ${token}` } })).status;
+    expect(await live(deviceA)).toBe(200);
+    expect(await live(deviceB)).toBe(200);
+  });
+
+  it("never replaces a token another client was asked to step up from", async () => {
+    const { sessionName } = await initSession({ userId: OWNER });
+    const claude = await signIn(["sessions.read"]);
+    const refused = await callTool(claude, "send_prompt", {
+      session_id: sessionName,
+      content: "x",
+    });
+    expect(refused.status).toBe(403);
+    // Claude Code signs in for writes; Claude's challenged token is not its to replace.
+    const { request, verifier } = await authorizationRequest({
+      client_id: CLAUDE_CODE,
+      redirect_uri: "http://127.0.0.1:43123/callback",
+      scope: "sessions.read sessions.collaborate",
+    });
+    await expect(check(request)).resolves.toMatchObject({ kind: "consent", replaces: null });
+    await tokenFor(request, verifier, ["sessions.read", "sessions.collaborate"], null);
+    expect(
+      (await controlPlane("/sessions", { headers: { Authorization: `Bearer ${claude}` } })).status
+    ).toBe(200);
+  });
+
+  it("asks to step up to an automation's target use when triggering it", async () => {
+    const automationId = "automation-step-up";
+    await new AutomationStore(env.DB).create(
+      makeAutomation({ id: automationId, created_by: OWNER, user_id: OWNER })
+    );
+    await env.DB.prepare(
+      `INSERT INTO automation_repositories
+         (automation_id, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at)
+       VALUES (?, 'acme', 'web-app', 12345, NULL, ?, ?)`
+    )
+      .bind(automationId, Date.now(), Date.now())
+      .run();
+    const token = await signIn([
+      "automations.read",
+      "automations.trigger.own",
+      "sessions.create",
+      "sessions.read",
+    ]);
+    const response = await callTool(token, "trigger_automation", { automation_id: automationId });
+    expect(response.status).toBe(403);
+    const scope = /scope="([^"]*)"/.exec(response.headers.get("WWW-Authenticate")!)![1].split(" ");
+    expect(scope).toContain("repositories.use");
   });
 
   it("does not challenge for a permission the owner does not hold", async () => {

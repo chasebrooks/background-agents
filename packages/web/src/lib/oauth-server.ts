@@ -42,7 +42,12 @@ export async function relayOAuthResponse(response: Response): Promise<Response> 
     body = await response.json();
   } catch {
     return Response.json(
-      { error: "server_error", error_description: "Unexpected response from the control plane" },
+      {
+        error: "server_error",
+        // The code may have been spent; presenting it again would revoke what it issued.
+        error_description:
+          "Unexpected response from the control plane. If no token was received, start authorization again; do not retry this code.",
+      },
       { status: 502, headers: OAUTH_RESPONSE_HEADERS }
     );
   }

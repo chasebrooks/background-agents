@@ -605,11 +605,15 @@ tokens, not only `/mcp`.
   should hold, but only if the member holds the missing permissions now and the policy allows them;
   otherwise the tool runs and reports what is missing. A token the member pasted into a client is
   never challenged. The challenge marks the challenged token; a sign-in from the same client within
-  15 minutes whose approved grant includes a write replaces exactly that token, as the consent page
-  shows, and approval is refused if the token shown is no longer the one to replace. A grant of
-  reads alone, or a sign-in without a recent challenge, replaces nothing, since one client ID is
-  shared by every device. The client's expired tokens are deleted when it is issued a new one, so
-  they never fill the per-user cap.
+  15 minutes whose approved grant includes a write replaces that token, as the consent page shows,
+  and approval is refused if the token shown is no longer the one to replace. A grant of reads
+  alone, or a sign-in without a recent challenge, replaces nothing, since one client ID is shared by
+  every device. OAuth carries nothing from a challenge to the sign-in it starts, so when more than
+  one of the member's tokens from the client was challenged in the window, which device is signing
+  in is unknown and none is replaced. For `trigger_automation` the challenge also covers the
+  automation's target use permission, looked up with the caller's token, which works when the token
+  can read the automation. The client's expired tokens are deleted when it is issued a new one, so
+  they never fill the per-user cap; that pruning happens only if the new token is issued.
 - **Off switch.** Turning MCP clients off refuses `/mcp`, OAuth sign-in, and every token issued
   through sign-in, on every route. Tokens members made in Settings keep working with the API.
 - **Abuse limits.** The consent page cannot be framed (`frame-ancestors 'none'`), approving requires

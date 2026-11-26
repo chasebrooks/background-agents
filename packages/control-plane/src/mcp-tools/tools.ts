@@ -80,6 +80,12 @@ export interface ToolDefinition {
    * the tool calls names the other if it is the one needed.
    */
   scopesFor(args: unknown): readonly PermissionId[];
+  /**
+   * Permissions a call needs that only the control plane knows, looked up through `client` with
+   * the caller's own token: the use permission for the targets of an automation it triggers. Empty
+   * when the lookup is refused, and the route the tool calls then names what is missing.
+   */
+  resolveScopes?(client: ControlPlaneClient, args: unknown): Promise<readonly PermissionId[]>;
   /** Drives the MCP `readOnlyHint`, a hint a client may use to decide what to prompt for. */
   readOnly: boolean;
   /**
@@ -96,13 +102,18 @@ export interface ToolDefinition {
 /** A tool as it is written: its handler receives exactly what its schema produces. */
 interface ToolSpec<Shape extends z.ZodRawShape> extends Omit<
   ToolDefinition,
-  "inputSchema" | "run" | "scopesFor" | "requires"
+  "inputSchema" | "run" | "scopesFor" | "requires" | "resolveScopes"
 > {
   inputSchema: Shape;
   /** The permissions every call needs. `requires` is written from these. */
   scopes: readonly PersonalAccessTokenGrantablePermission[];
   /** What else a call may need that the tool cannot know in advance, in words. */
   alternatives?: string;
+  /** Further permissions a call needs for targets the control plane must look up. */
+  resolveScopes?(
+    client: ControlPlaneClient,
+    args: z.output<z.ZodObject<Shape>>
+  ): Promise<readonly PersonalAccessTokenGrantablePermission[]>;
   /** Further permissions a call needs for the targets its arguments name. */
   targetScopes?(
     args: z.output<z.ZodObject<Shape>>
@@ -117,9 +128,17 @@ interface ToolSpec<Shape extends z.ZodRawShape> extends Omit<
  */
 function defineTool<const Shape extends z.ZodRawShape>(spec: ToolSpec<Shape>): ToolDefinition {
   const schema = z.object(spec.inputSchema);
-  const { scopes, targetScopes, alternatives, ...rest } = spec;
+  const { scopes, targetScopes, resolveScopes, alternatives, ...rest } = spec;
   return {
     ...rest,
+    ...(resolveScopes
+      ? {
+          resolveScopes: async (client: ControlPlaneClient, args: unknown) => {
+            const parsed = schema.safeParse(args);
+            return parsed.success ? resolveScopes(client, parsed.data) : [];
+          },
+        }
+      : {}),
     requires: alternatives ? `${listed(scopes)}, plus ${alternatives}` : listed(scopes),
     scopesFor: (args) => {
       // Arguments that do not parse name no target; the call fails on them before any route.
@@ -143,6 +162,14 @@ export function toolReadScopes(): PermissionId[] {
   );
   return PERMISSION_IDS.filter((permission) => reads.has(permission));
 }
+
+/** What step-up needs of an automation: whether it targets repositories, environments, or both. */
+const automationTargetsSchema = z.object({
+  automation: z.object({
+    repositories: z.array(z.unknown()),
+    environmentIds: z.array(z.string()),
+  }),
+});
 
 /** The permission a target needs: using a repository, or an environment. */
 function targetUse(target: {
@@ -787,6 +814,22 @@ export const TOOLS: ToolDefinition[] = [
   defineTool({
     name: "trigger_automation",
     scopes: ["automations.trigger.own", "sessions.create"],
+    resolveScopes: async (client, args) => {
+      try {
+        const found = automationTargetsSchema.safeParse(
+          await client.get(`/automations/${encodeURIComponent(args.automation_id)}`)
+        );
+        return found.success
+          ? targetUse({
+              repository: found.data.automation.repositories.length > 0,
+              environment: found.data.automation.environmentIds.length > 0,
+            })
+          : [];
+      } catch {
+        // Unreadable to this token (it lacks automations.read) or gone: the trigger route says so.
+        return [];
+      }
+    },
     alternatives:
       "automations.trigger.any in place of automations.trigger.own for an automation you do not " +
       "run, and repositories.use or environments.use for its targets",

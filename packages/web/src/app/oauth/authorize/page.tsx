@@ -12,7 +12,7 @@ import { ErrorBanner } from "@/components/ui/error-banner";
 import { AuthenticationUnavailableError } from "@/lib/authentication-unavailable-error";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
 import { getServerAuthSession, type ServerAuthSession } from "@/lib/server-auth-session";
-import { signInPath } from "@/lib/sign-in-return-to";
+import { MAX_RETURN_TO_LENGTH, signInPath } from "@/lib/sign-in-return-to";
 import { APP_NAME } from "@/lib/site-config";
 
 export const dynamic = "force-dynamic";
@@ -95,6 +95,12 @@ export default async function OAuthAuthorizePage({ searchParams }: AuthorizePage
   if (request === null) {
     return <SignInRefused message="The app's sign-in request is not valid." />;
   }
+  // The request must survive the round trip through sign-in, which returns only to a path of
+  // bounded length; refused here, it is refused the same way for every user.
+  const returnPath = `${AUTHORIZE_PATH}?${new URLSearchParams(request)}`;
+  if (returnPath.length > MAX_RETURN_TO_LENGTH) {
+    return <SignInRefused message="The app's sign-in request is too long." />;
+  }
 
   let session: ServerAuthSession | null;
   try {
@@ -106,7 +112,7 @@ export default async function OAuthAuthorizePage({ searchParams }: AuthorizePage
     throw error;
   }
   if (!session) {
-    redirect(signInPath(`${AUTHORIZE_PATH}?${new URLSearchParams(request)}`));
+    redirect(signInPath(returnPath));
   }
 
   const consent = await checkRequest(request);

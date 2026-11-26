@@ -28,17 +28,20 @@ describe("OAuth sign-in contract", () => {
   });
 
   it("requires an approval to grant something for at least a day", () => {
-    expect(
-      oauthApprovalRequestSchema.safeParse({ request: {}, permissions: [], expiresInDays: 30 })
-        .success
-    ).toBe(false);
-    expect(
-      oauthApprovalRequestSchema.safeParse({
-        request: {},
-        permissions: ["sessions.read"],
-        expiresInDays: 0,
-      }).success
-    ).toBe(false);
+    const valid = {
+      request: {},
+      permissions: ["sessions.read"],
+      expiresInDays: 1,
+      replacesTokenId: null,
+    };
+    expect(oauthApprovalRequestSchema.safeParse(valid).success).toBe(true);
+    expect(oauthApprovalRequestSchema.safeParse({ ...valid, permissions: [] }).success).toBe(false);
+    expect(oauthApprovalRequestSchema.safeParse({ ...valid, expiresInDays: 0 }).success).toBe(
+      false
+    );
+    // The replacement the page showed is always stated, null when there is none.
+    const { replacesTokenId: _omitted, ...withoutReplacement } = valid;
+    expect(oauthApprovalRequestSchema.safeParse(withoutReplacement).success).toBe(false);
   });
 
   it("parses each consent outcome", () => {

@@ -159,3 +159,25 @@ describe("LoginPage return-to", () => {
     }
   );
 });
+
+describe("LoginPage when sign-in is unavailable", () => {
+  it("keeps where it returns to in the retry link", async () => {
+    mocks.getServerAuthSession.mockRejectedValue(new AuthenticationUnavailableError(new Error()));
+    render(
+      await LoginPage({ searchParams: Promise.resolve({ returnTo: "/oauth/authorize?state=1" }) })
+    );
+    expect(screen.getByRole("link", { name: "Try again" })).toHaveAttribute(
+      "href",
+      "/login?returnTo=%2Foauth%2Fauthorize%3Fstate%3D1"
+    );
+    cleanup();
+
+    mocks.getServerAuthSession.mockResolvedValue(null);
+    mocks.getEnabledSignInProviders.mockRejectedValue(
+      new AuthenticationUnavailableError(new Error())
+    );
+    render(await LoginPage({ searchParams: Promise.resolve({ returnTo: "//evil.example" }) }));
+    // An unsafe destination is dropped, as it is everywhere else.
+    expect(screen.getByRole("link", { name: "Try again" })).toHaveAttribute("href", "/login");
+  });
+});

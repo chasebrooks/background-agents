@@ -7,7 +7,7 @@
 const PARSER_ORIGIN = "https://return-to.invalid";
 
 /** Longest return-to accepted; an OAuth authorization request fits well within it. */
-const MAX_RETURN_TO_LENGTH = 8192;
+export const MAX_RETURN_TO_LENGTH = 8192;
 
 /** The path to return to after signing in, or null when `value` is not a safe same-origin path. */
 export function safeReturnTo(value: unknown): string | null {

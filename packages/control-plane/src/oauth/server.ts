@@ -35,11 +35,19 @@ export interface OAuthEndpoints {
   readonly resourceMetadataUrl: string;
 }
 
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * The control plane's origin, which the resource identifier is built on: HTTPS, as RFC 9728
+ * requires of a resource identifier, or plain HTTP on a loopback host for local development.
+ */
 function controlPlaneOrigin(value: string | undefined): string | null {
   if (!value) return null;
   try {
     const url = new URL(value);
-    return url.protocol === "https:" || url.protocol === "http:" ? url.origin : null;
+    const secure = url.protocol === "https:";
+    const local = url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname);
+    return secure || local ? url.origin : null;
   } catch {
     return null;
   }

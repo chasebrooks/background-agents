@@ -154,11 +154,40 @@ describe("POST /oauth/token", () => {
     vi.unstubAllEnvs();
   });
 
-  it("answers a control plane it cannot reach as temporarily unavailable", async () => {
+  it("tells the client to start over, not retry the code, when the exchange's outcome is lost", async () => {
     forward.mockRejectedValue(new Error("unreachable"));
     const { POST } = await import("./route");
     const response = await POST(tokenRequest(EXCHANGE));
     expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toMatchObject({ error: "temporarily_unavailable" });
+    const body = await response.json();
+    expect(body).toMatchObject({ error: "temporarily_unavailable" });
+    expect(body.error_description).toContain("start authorization again; do not retry this code");
+    // An unreadable answer is no better: the code may be spent.
+    forward.mockResolvedValue(new Response("<html>", { status: 200 }));
+    const garbled = await POST(tokenRequest(EXCHANGE));
+    expect(garbled.status).toBe(502);
+    expect((await garbled.json()).error_description).toContain("do not retry this code");
+  });
+
+  it("answers a body that breaks off without forwarding any of it", async () => {
+    const { POST } = await import("./route");
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("grant_type=authorization_code&code="));
+        controller.error(new Error("connection reset"));
+      },
+    });
+    const response = await POST(
+      new Request("https://app.example/oauth/token", {
+        method: "POST",
+        headers: FORM,
+        body,
+        duplex: "half",
+      } as RequestInit)
+    );
+    expect(response.status).toBe(400);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_request" });
+    expect(forward).not.toHaveBeenCalled();
   });
 });

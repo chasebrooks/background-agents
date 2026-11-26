@@ -49,3 +49,26 @@ it("relays a refusal so the consent page can show it", async () => {
   expect(response.status).toBe(409);
   await expect(response.json()).resolves.toMatchObject({ error: "Too many tokens" });
 });
+
+it("answers a body that breaks off with its own error, forwarding nothing", async () => {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"request":'));
+      controller.error(new Error("connection reset"));
+    },
+  });
+  const response = await POST(
+    new Request("https://app.example/api/oauth/authorize", {
+      method: "POST",
+      headers: { "sec-fetch-site": "same-origin" },
+      body,
+      duplex: "half",
+    } as RequestInit)
+  );
+  expect(response.status).toBe(400);
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  await expect(response.json()).resolves.toEqual({
+    error: "The approval could not be read; try again",
+  });
+  expect(fetcher).not.toHaveBeenCalled();
+});

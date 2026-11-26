@@ -50,6 +50,44 @@ describe("fetchClientMetadata", () => {
     }
   });
 
+  it("accepts a public client however the document says so, and nothing else", async () => {
+    const document = (extra: object) =>
+      serving({ client_id: CLIENT, redirect_uris: ["https://client.example/cb"], ...extra });
+    for (const accepted of [
+      {},
+      { token_endpoint_auth_method: "none" },
+      { token_endpoint_auth_methods_supported: ["none"] },
+      { token_endpoint_auth_methods_supported: ["private_key_jwt", "none"] },
+      { token_endpoint_auth_methods_supported: ["none"], token_endpoint_auth_method: "none" },
+    ]) {
+      await expect(
+        fetchClientMetadata(CLIENT, document(accepted)),
+        JSON.stringify(accepted)
+      ).resolves.toMatchObject({ clientId: CLIENT });
+    }
+    for (const refused of [
+      { token_endpoint_auth_method: "private_key_jwt" },
+      { token_endpoint_auth_methods_supported: ["private_key_jwt"] },
+      // The plural is honoured over a singular `none`.
+      {
+        token_endpoint_auth_methods_supported: ["private_key_jwt"],
+        token_endpoint_auth_method: "none",
+      },
+      // A singular value outside the plural is inconsistent.
+      {
+        token_endpoint_auth_methods_supported: ["none"],
+        token_endpoint_auth_method: "private_key_jwt",
+      },
+      { client_secret: "shh" },
+      { client_secret_expires_at: 0 },
+    ]) {
+      await expect(
+        fetchClientMetadata(CLIENT, document(refused)),
+        JSON.stringify(refused)
+      ).rejects.toThrow("authenticates in a way");
+    }
+  });
+
   it("does not repeat the document host's status to the user", async () => {
     await expect(fetchClientMetadata(CLIENT, serving("nope", { status: 418 }))).rejects.toThrow(
       "The app's metadata document could not be fetched"

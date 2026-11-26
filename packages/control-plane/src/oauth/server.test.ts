@@ -26,8 +26,17 @@ describe("OAuth endpoints", () => {
     ["with a web app URL that is not an origin", { ...ENV, WEB_APP_URL: "https://app.example/x" }],
     ["with an insecure web app URL", { ...ENV, WEB_APP_URL: "http://app.example" }],
     ["with a malformed control plane URL", { ...ENV, WORKER_URL: "not a url" }],
+    ["with a control plane on plain HTTP", { ...ENV, WORKER_URL: "http://cp.example" }],
   ])("is unavailable %s", (_label, env) => {
     expect(oauthEndpoints(env)).toBeNull();
+  });
+
+  it("allows plain HTTP only for a control plane on a loopback host", () => {
+    for (const worker of ["http://localhost:8787", "http://127.0.0.1:8787"]) {
+      expect(
+        oauthEndpoints({ WEB_APP_URL: "http://localhost:3000", WORKER_URL: worker })?.resource
+      ).toBe(`${worker}/mcp`);
+    }
   });
 
   it("is unavailable while tokens or MCP clients are off", () => {

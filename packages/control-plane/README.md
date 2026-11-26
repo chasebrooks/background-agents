@@ -437,11 +437,12 @@ issued. The access token is a personal access token whose row records `oauth_cli
 refresh token and no revocation endpoint. `resource` is checked but not bound to the token, which
 works on every route that accepts tokens. A step-up challenge from `/mcp` marks the challenged token
 (`oauth_step_up_requested_at`); the client's next sign-in within `STEP_UP_REPLACEMENT_WINDOW_MS`
-whose approved grant writes replaces exactly that token, and approval is refused with
-`409 oauth_replacement_changed` if it no longer matches what the page showed. Issuing deletes the
-client's expired tokens first, so they do not fill the cap. Every issuance rule is checked at
-approve (the same rules and codes as `POST /personal-access-tokens`); the exchange answers RFC 6749
-errors (`invalid_grant`, `invalid_target`, `unsupported_grant_type`, `invalid_request`). See
+whose approved grant writes replaces that token if it is the only one of the client's challenged in
+the window (none if several were), and approval is refused with `409 oauth_replacement_changed` if
+it no longer matches what the page showed. Issuing deletes the client's expired tokens first, so
+they do not fill the cap. Every issuance rule is checked at approve (the same rules and codes as
+`POST /personal-access-tokens`); the exchange answers RFC 6749 errors (`invalid_grant`,
+`invalid_target`, `unsupported_grant_type`, `invalid_request`). See
 [OAuth sign-in for MCP clients](../../docs/AUTH.md#oauth-sign-in-for-mcp-clients).
 
 ### Audit Events

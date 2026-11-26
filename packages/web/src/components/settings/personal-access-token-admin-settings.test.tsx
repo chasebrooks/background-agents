@@ -217,6 +217,36 @@ describe("PersonalAccessTokenAdminSettings", () => {
     );
   });
 
+  it("shows the saved client list again after a discard or a conflicting save", async () => {
+    hooks.policy = { ...OPEN_POLICY, oauthClientIds: ["https://a.example/metadata"] };
+    hooks.save.mockResolvedValue({ status: "conflict" });
+    const user = userEvent.setup();
+    render(<PersonalAccessTokenAdminSettings />);
+    const list = () => screen.getByLabelText(/Client metadata document URLs/);
+    expect(list()).toHaveValue("https://a.example/metadata");
+
+    await user.clear(list());
+    await user.type(list(), "https://b.example/metadata");
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(list()).toHaveValue("https://a.example/metadata");
+
+    // A save that loses to another administrator's shows theirs, not the text just typed.
+    await user.clear(list());
+    await user.type(list(), "https://b.example/metadata");
+    hooks.policy = { ...OPEN_POLICY, oauthClientIds: ["https://c.example/metadata"], revision: 4 };
+    await user.click(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(list()).toHaveValue("https://c.example/metadata"));
+
+    // Then changing only the lifetime saves the list that is shown.
+    hooks.save.mockResolvedValue({ status: "saved", policy: hooks.policy });
+    await user.click(screen.getByRole("radio", { name: /30 days/ }));
+    await user.click(screen.getByRole("button", { name: "Save policy" }));
+    expect(hooks.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({ oauthClientIds: ["https://c.example/metadata"] }),
+      4
+    );
+  });
+
   it("hides the MCP switch for a control plane that predates it, and saves without it", async () => {
     // Deploys can briefly pair this app with an older control plane, which refuses the field.
     const { mcpEnabled: _omitted, oauthClientIds: _alsoOmitted, ...older } = OPEN_POLICY;

@@ -113,6 +113,7 @@ async function handleApprove(
       params: parsed.request,
       permissions: parsed.permissions,
       expiresInDays: parsed.expiresInDays,
+      replacesTokenId: parsed.replacesTokenId,
     },
     consentingUser(ctx),
     env,

@@ -8,10 +8,15 @@
 -- authentication: such tokens stop working when MCP clients are turned off.
 ALTER TABLE personal_access_tokens ADD COLUMN oauth_client_id TEXT;
 
--- A user's tokens from one client, for pruning its expired ones.
+-- A user's tokens from one client, for step-up replacement and pruning expired ones.
 CREATE INDEX idx_personal_access_tokens_oauth_client
   ON personal_access_tokens(user_id, oauth_client_id)
   WHERE oauth_client_id IS NOT NULL;
+
+-- When /mcp last answered this token with a step-up challenge. The sign-in that follows within a
+-- short window replaces exactly this token, rather than guessing which of the client's tokens
+-- (one per device) asked.
+ALTER TABLE personal_access_tokens ADD COLUMN oauth_step_up_requested_at INTEGER;
 
 -- The clients members may sign in to, as a JSON list of client ID metadata
 -- document URLs. NULL means the built-in defaults, so a deployment that never
@@ -36,6 +41,8 @@ CREATE TABLE oauth_authorization_codes (
   permissions_json TEXT NOT NULL,
   expires_in_days INTEGER NOT NULL,
   token_name TEXT NOT NULL,
+  -- The earlier token from the same client this approval replaces (step-up).
+  replaces_token_id TEXT,
   policy_revision INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,

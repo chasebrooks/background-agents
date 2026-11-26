@@ -42,6 +42,8 @@ Then choose how long the connection lasts, up to your workspace's lifetime cap, 
 
 The token works wherever a personal access token does, not only at `/mcp`: the app could call the API directly with it, within the same grant.
 
+When a read-only connection tries something it isn't allowed to do, such as sending a prompt, and you could grant it, the client asks you to sign in again for more access, with the extra permissions selected. If you approve within 15 minutes with any write permission, the new token replaces the one that was refused, and the page says which. Choosing **Read only** replaces nothing. Tokens on your other devices are untouched: only the device that was refused gets a new token.
+
 Only apps your workspace allows can sign in. By default these are Claude's apps; an administrator can change the list under **Settings › API policy**.
 
 ## Connect with a token
@@ -58,7 +60,7 @@ A client that cannot sign in with OAuth, or a script, can send a token instead:
 
    A client that only runs local servers can reach it through a bridge such as `mcp-remote` with the same header.
 
-A tool the token lacks the permission for returns an error naming what is missing, and you create a token with more if you need it.
+A token you paste is never asked to step up: a tool it lacks the permission for returns an error naming what is missing, and you create a token with more if you need it.
 
 The server is stateless: each request stands alone, so a client checks on a session by calling `get_session` again rather than waiting for a notification. An administrator can turn MCP off under **Settings › API policy**. That also turns off OAuth sign-in and stops every token an app received by signing in; tokens made in Settings keep working with the API directly.
 
@@ -90,7 +92,7 @@ Its control plane URL must use `https://`; plain `http://` is accepted only for 
 | `trigger_automation`                                                                                                      | **Run your automations** or **Run any automation**, **Create sessions**, and use of its targets |
 | `import_skill_from_git`, `update_skill_from_git`                                                                          | **Manage skills** (administrators), which always comes with **Read skills**                     |
 
-A token without a tool's permission gets an error, which usually names the missing permission or points to the tool's description, where the needed grant is stated. The token never exceeds your own role or your workspace's [API policy](/administration/personal-access-tokens), and nothing it does can stop, archive, or delete a session, open a session's sandbox editor, terminal, or tunnels, delete or pause an automation, delete a skill, or reach secrets or workspace settings. A run started with `trigger_automation` uses only what the token was granted, even where your role allows more.
+A token without a tool's permission gets an error, which usually names the missing permission or points to the tool's description, where the needed grant is stated. A connection made with OAuth is asked to step up instead, when you could grant the permission. The token never exceeds your own role or your workspace's [API policy](/administration/personal-access-tokens), and nothing it does can stop, archive, or delete a session, open a session's sandbox editor, terminal, or tunnels, delete or pause an automation, delete a skill, or reach secrets or workspace settings. A run started with `trigger_automation` uses only what the token was granted, even where your role allows more.
 
 ## Keep the assistant in check
 

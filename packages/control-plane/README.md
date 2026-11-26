@@ -435,10 +435,13 @@ without redirects, capped at 5 KiB and 5 seconds. Codes use PKCE S256 and are he
 `oauth_authorization_codes` for five minutes, single-use, with a replay revoking what the code
 issued. The access token is a personal access token whose row records `oauth_client_id`; there is no
 refresh token and no revocation endpoint. `resource` is checked but not bound to the token, which
-works on every route that accepts tokens. Issuing deletes the client's expired tokens first, so they
-do not fill the cap. Every issuance rule is checked at approve (the same rules and codes as
-`POST /personal-access-tokens`); the exchange answers RFC 6749 errors (`invalid_grant`,
-`invalid_target`, `unsupported_grant_type`, `invalid_request`). See
+works on every route that accepts tokens. A step-up challenge from `/mcp` marks the challenged token
+(`oauth_step_up_requested_at`); the client's next sign-in within `STEP_UP_REPLACEMENT_WINDOW_MS`
+whose approved grant writes replaces exactly that token, and approval is refused with
+`409 oauth_replacement_changed` if it no longer matches what the page showed. Issuing deletes the
+client's expired tokens first, so they do not fill the cap. Every issuance rule is checked at
+approve (the same rules and codes as `POST /personal-access-tokens`); the exchange answers RFC 6749
+errors (`invalid_grant`, `invalid_target`, `unsupported_grant_type`, `invalid_request`). See
 [OAuth sign-in for MCP clients](../../docs/AUTH.md#oauth-sign-in-for-mcp-clients).
 
 ### Audit Events
@@ -835,10 +838,12 @@ handler-authenticated and grants nothing itself. It answers `404` while the API 
 `mcp_enabled` is off, refuses a browser `Origin` whose hostname is not that of `WEB_APP_URL` or
 `WORKER_URL`, and requires a live personal access token (a `401` with a `Bearer` challenge
 otherwise, and also when a service signature is present). While [OAuth sign-in](#oauth-sign-in) is
-available the challenge carries `resource_metadata` and the read-only `scope`. Each tool call is
-then a request to this same app, made in-process with the same bearer token, so the route it reaches
-admits, narrows, and audits it exactly as a direct API call. Tool arguments are never logged. The
-local stdio server in `packages/mcp-server` registers the same tools and is deprecated.
+available the challenge carries `resource_metadata` and the read-only `scope`, and a tool call by a
+token issued through sign-in that lacks a permission the tool needs, which its owner could grant,
+answers `403` with `error="insufficient_scope"` and the full scope set instead of running. Each tool
+call is then a request to this same app, made in-process with the same bearer token, so the route it
+reaches admits, narrows, and audits it exactly as a direct API call. Tool arguments are never
+logged. The local stdio server in `packages/mcp-server` registers the same tools and is deprecated.
 
 Five rules reach past route admission:
 

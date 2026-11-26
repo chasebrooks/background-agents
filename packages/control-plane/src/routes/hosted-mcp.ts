@@ -15,17 +15,25 @@
  */
 
 import { Hono } from "hono";
+import type { PermissionId } from "@open-inspect/shared/rbac";
 import { SERVICE_SIGNATURE_HEADER } from "@open-inspect/shared/service-auth";
 import { createMcpHandler, originValidationResponse } from "@modelcontextprotocol/server";
+import {
+  personalAccessTokenPolicyAllows,
+  withGrantPrerequisites,
+} from "@open-inspect/shared/types/personal-access-tokens";
 import { authenticate, isAuthError } from "../auth/authenticate";
 import { readPersonalAccessToken } from "../auth/personal-access-token";
 import { PersonalAccessTokenPolicyStore } from "../db/personal-access-token-policy";
-import { error } from "../http/responses";
+import { PersonalAccessTokenStore } from "../db/personal-access-tokens";
+import { error, json } from "../http/responses";
 import { createLogger } from "../logger";
 import { McpError } from "../mcp/errors";
 import { readMcpBody } from "../mcp/relay";
 import { ControlPlaneClient, type ControlPlaneFetch } from "../mcp-tools/client";
 import { createHostedMcpServer } from "../mcp-tools/server";
+import { TOOLS } from "../mcp-tools/tools";
+import { AuthorizationService } from "../authorization/service";
 import {
   availableOAuthEndpoints,
   bearerChallenge,
@@ -41,6 +49,7 @@ import type { Env } from "../types";
 import {
   NO_AUTHORIZATION,
   SCM_AGNOSTIC_HANDLER_AUTHENTICATED_ROUTE,
+  type PersonalAccessTokenPrincipal,
   type RequestContext,
 } from "./shared";
 
@@ -92,6 +101,75 @@ function unauthorized(
     })
   );
   return response;
+}
+
+/**
+ * The step-up challenge for a tool call the token lacks permissions for, or null to let the call
+ * run and fail with the permission it lacks.
+ *
+ * Only a token issued through OAuth sign-in is challenged: its client can sign the user in again
+ * for more. A token pasted into a client's configuration is not, since that client has nothing to
+ * sign in with, and some refuse to connect at all after a challenge. Nor is a token whose owner
+ * could not grant what is missing (they do not hold it, or the policy does not allow it), which
+ * would only send the user round the same refusal again.
+ *
+ * The challenge names everything the token should hold, its grant and what the call needs, since a
+ * client may not carry an earlier step-up's scopes into the next. It also marks the token, so the
+ * sign-in it starts replaces this token rather than another device's from the same app.
+ */
+async function stepUpChallenge(
+  message: unknown,
+  principal: PersonalAccessTokenPrincipal,
+  endpoints: OAuthEndpoints | null,
+  policy: OAuthPolicy,
+  ctx: RequestContext
+): Promise<Response | null> {
+  if (endpoints === null || principal.oauthClientId === undefined) return null;
+  const call = toolCallOf(message);
+  if (call === null) return null;
+  const tool = TOOLS.find((candidate) => candidate.name === call.name);
+  if (!tool) return null;
+  const needed = tool.scopesFor(call.arguments);
+  const missing = needed.filter((permission) => !principal.grant.includes(permission));
+  if (missing.length === 0) return null;
+  let held: readonly PermissionId[];
+  try {
+    held = (await new AuthorizationService(ctx.db).getEffectiveAuthorization(principal.userId))
+      .permissions;
+  } catch {
+    // An owner without a role holds nothing; the route the tool calls refuses them as usual.
+    return null;
+  }
+  const grantable = missing.every(
+    (permission) => held.includes(permission) && personalAccessTokenPolicyAllows(policy, permission)
+  );
+  if (!grantable) return null;
+  const scope = withGrantPrerequisites([...principal.grant, ...needed]).filter((permission) =>
+    personalAccessTokenPolicyAllows(policy, permission)
+  );
+  // The sign-in this starts replaces exactly this token, not another device's from the same app.
+  await new PersonalAccessTokenStore(ctx.db).recordStepUpRequest(principal.tokenId, Date.now());
+  const response = json(
+    {
+      error: "insufficient_scope",
+      error_description: `${tool.name} needs ${missing.join(", ")}, which this connection was not granted`,
+    },
+    403
+  );
+  response.headers.set(
+    "WWW-Authenticate",
+    bearerChallenge(endpoints, { error: "insufficient_scope", scope })
+  );
+  return response;
+}
+
+/** The tool a `tools/call` message names, with its arguments; null for any other message. */
+function toolCallOf(message: unknown): { name: string; arguments: unknown } | null {
+  if (typeof message !== "object" || message === null) return null;
+  const { method, params } = message as { method?: unknown; params?: unknown };
+  if (method !== "tools/call" || typeof params !== "object" || params === null) return null;
+  const { name, arguments: args } = params as { name?: unknown; arguments?: unknown };
+  return typeof name === "string" ? { name, arguments: args ?? {} } : null;
 }
 
 /**
@@ -234,6 +312,10 @@ async function serveMcp(
     const read = await readMessage(request);
     if (read instanceof Response) return read;
     parsedBody = read.message;
+    if (auth.principal.kind === "personal-access-token") {
+      const challenge = await stepUpChallenge(parsedBody, auth.principal, endpoints, policy, ctx);
+      if (challenge) return challenge;
+    }
   }
 
   const exchange: ExchangeContext = {

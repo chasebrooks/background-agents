@@ -32,6 +32,8 @@ export interface OAuthAuthorizationGrant {
   readonly expiresInDays: number;
   /** The name the issued token is listed under. */
   readonly tokenName: string;
+  /** The earlier token from the same client to replace, on step-up. */
+  readonly replacesTokenId: string | null;
   /** The API policy revision the approval was checked against. */
   readonly policyRevision: number;
 }
@@ -58,6 +60,7 @@ interface CodeRow {
   permissions_json: string;
   expires_in_days: number;
   token_name: string;
+  replaces_token_id: string | null;
   policy_revision: number;
   expires_at: number;
 }
@@ -79,6 +82,7 @@ function toCode(row: CodeRow): OAuthAuthorizationCode {
     permissions,
     expiresInDays: row.expires_in_days,
     tokenName: row.token_name,
+    replacesTokenId: row.replaces_token_id,
     policyRevision: row.policy_revision,
     expiresAt: row.expires_at,
   };
@@ -97,9 +101,9 @@ export class OAuthAuthorizationCodeStore {
         .prepare(
           `INSERT INTO oauth_authorization_codes
              (code_hash, user_id, client_id, redirect_uri, code_challenge, resource,
-              permissions_json, expires_in_days, token_name, policy_revision, created_at,
-              expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              permissions_json, expires_in_days, token_name, replaces_token_id, policy_revision,
+              created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           codeHash,
@@ -111,6 +115,7 @@ export class OAuthAuthorizationCodeStore {
           JSON.stringify(grant.permissions),
           grant.expiresInDays,
           grant.tokenName,
+          grant.replacesTokenId,
           grant.policyRevision,
           now,
           now + OAUTH_AUTHORIZATION_CODE_TTL_MS
@@ -128,8 +133,8 @@ export class OAuthAuthorizationCodeStore {
         `UPDATE oauth_authorization_codes SET consumed_at = ?
           WHERE code_hash = ? AND consumed_at IS NULL
           RETURNING code_hash, user_id, client_id, redirect_uri, code_challenge, resource,
-                    permissions_json, expires_in_days, token_name, policy_revision,
-                    expires_at`
+                    permissions_json, expires_in_days, token_name, replaces_token_id,
+                    policy_revision, expires_at`
       )
       .bind(now, codeHash)
       .first<CodeRow>();

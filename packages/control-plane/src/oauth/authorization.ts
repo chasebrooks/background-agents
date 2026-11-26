@@ -17,6 +17,7 @@ import {
 } from "@open-inspect/shared/types/oauth";
 import {
   isPersonalAccessTokenGrantable,
+  isPersonalAccessTokenReadOnlyPermission,
   PERSONAL_ACCESS_TOKEN_MAX_PER_USER,
   PERSONAL_ACCESS_TOKEN_NAME_MAX_LENGTH,
   personalAccessTokenEffectiveExpiry,
@@ -232,20 +233,45 @@ function tokenName(clientId: string, clientName: string | null): string {
 }
 
 /**
- * The user's tokens from a client that are past their effective expiry: pruned when the client is
- * issued a new one, so a client that signs in again each time never fills the per-user cap.
+ * How long after `/mcp` asks a client to step up the sign-in that follows replaces the token it
+ * asked about. Long enough for the user to read the consent page; short enough that a later,
+ * unrelated sign-in from the same client replaces nothing.
  */
-async function expiredClientTokens(
+export const STEP_UP_REPLACEMENT_WINDOW_MS = 15 * 60 * 1000;
+
+/** The user's tokens from a client that bear on a new sign-in: one to replace, and expired ones. */
+interface ClientTokens {
+  /** The live token `/mcp` most recently asked to step up, within the window; else null. */
+  readonly stepUp: string | null;
+  /** Tokens past their effective expiry: pruned when the new token is issued. */
+  readonly expiredIds: string[];
+}
+
+async function clientTokens(
   db: SqlDatabase,
   userId: string,
   clientId: string,
   policy: PersonalAccessTokenPolicySnapshot,
   now: number
-): Promise<string[]> {
+): Promise<ClientTokens> {
   const tokens = await new PersonalAccessTokenStore(db).listForOAuthClient(userId, clientId);
-  return tokens
-    .filter((token) => personalAccessTokenEffectiveExpiry(token, policy) <= now)
-    .map((token) => token.id);
+  const live = tokens.filter((token) => personalAccessTokenEffectiveExpiry(token, policy) > now);
+  const asked = live
+    .filter(
+      (token) =>
+        token.stepUpRequestedAt !== null &&
+        now - token.stepUpRequestedAt <= STEP_UP_REPLACEMENT_WINDOW_MS
+    )
+    .sort((a, b) => (b.stepUpRequestedAt ?? 0) - (a.stepUpRequestedAt ?? 0));
+  return {
+    stepUp: asked[0]?.id ?? null,
+    expiredIds: tokens.filter((token) => !live.includes(token)).map((token) => token.id),
+  };
+}
+
+/** Whether a grant writes: only then is it a step-up that replaces the token that asked for it. */
+function writes(permissions: readonly PermissionId[]): boolean {
+  return permissions.some((permission) => !isPersonalAccessTokenReadOnlyPermission(permission));
 }
 
 /** What the consent page shows for an authorization request. */
@@ -259,6 +285,19 @@ export async function describeAuthorizationRequest(
   const verification = await verifyRequest(params, user, env, db, fetcher);
   if (verification.kind !== "verified") return verification;
   const { request } = verification;
+  const { stepUp } = await clientTokens(
+    db,
+    user.userId,
+    request.clientId,
+    request.policy,
+    Date.now()
+  );
+  const replaces =
+    stepUp === null
+      ? null
+      : ((await new PersonalAccessTokenStore(db).list(user.userId)).find(
+          (token) => token.id === stepUp
+        ) ?? null);
   return {
     kind: "consent",
     client: {
@@ -274,6 +313,16 @@ export async function describeAuthorizationRequest(
     grantable: request.grantable,
     readOnly: request.readOnly,
     maxLifetimeDays: personalAccessTokenMaxLifetimeDays(request.policy),
+    replaces:
+      replaces === null
+        ? null
+        : {
+            id: replaces.id,
+            name: replaces.name,
+            displayPrefix: replaces.displayPrefix,
+            createdAt: replaces.createdAt,
+            lastUsedAt: replaces.lastUsedAt,
+          },
     denyUrl: redirectWith(request.redirectUri, request.endpoints.issuer, request.state, {
       error: "access_denied",
     }),
@@ -307,6 +356,8 @@ export async function approveAuthorizationRequest(
     params: OAuthAuthorizationRequest;
     permissions: readonly PermissionId[];
     expiresInDays: number;
+    /** The token the consent page showed this approval replacing, or null. */
+    replacesTokenId: string | null;
   },
   user: ConsentingUser,
   env: { WEB_APP_URL?: string; WORKER_URL?: string },
@@ -326,16 +377,33 @@ export async function approveAuthorizationRequest(
   if (refusal) return { kind: "refused", refusal };
 
   const now = Date.now();
-  const expiredIds = await expiredClientTokens(
+  const { stepUp, expiredIds } = await clientTokens(
     db,
     user.userId,
     request.clientId,
     request.policy,
     now
   );
+  // A grant of reads alone is not a step-up, even on the sign-in a challenge started.
+  const replaces = writes(input.permissions) ? stepUp : null;
+  if (input.replacesTokenId !== replaces) {
+    return {
+      kind: "refused",
+      refusal: {
+        status: 409,
+        body: {
+          error:
+            "The connection this would replace has changed since the page loaded. Reload the page and try again.",
+          code: OAUTH_CONSENT_ERROR_CODES.replacementChanged,
+        },
+      },
+    };
+  }
   // Expired tokens from this client are pruned at issue, so they do not count here either.
   const held =
-    (await new PersonalAccessTokenStore(db).list(user.userId)).length - expiredIds.length;
+    (await new PersonalAccessTokenStore(db).list(user.userId)).length -
+    (replaces === null ? 0 : 1) -
+    expiredIds.length;
   if (held >= PERSONAL_ACCESS_TOKEN_MAX_PER_USER) {
     return { kind: "refused", refusal: TOKEN_LIMIT_REACHED };
   }
@@ -352,6 +420,7 @@ export async function approveAuthorizationRequest(
       permissions: input.permissions,
       expiresInDays: input.expiresInDays,
       tokenName: tokenName(request.clientId, request.clientName),
+      replacesTokenId: replaces,
       policyRevision: request.policy.revision,
     },
     now
@@ -451,7 +520,7 @@ export async function exchangeAuthorizationCode(
   if (availableOAuthEndpoints(env, policy) === null) {
     return tokenError("invalid_grant", "Signing in apps is turned off for this workspace");
   }
-  const expiredIds = await expiredClientTokens(db, code.userId, code.clientId, policy, now);
+  const { expiredIds } = await clientTokens(db, code.userId, code.clientId, policy, now);
   const result = await new PersonalAccessTokenStore(db).issue({
     userId: code.userId,
     name: code.tokenName,
@@ -463,6 +532,7 @@ export async function exchangeAuthorizationCode(
     oauth: {
       clientId: code.clientId,
       codeHash,
+      replacesTokenId: code.replacesTokenId,
       expiredTokenIds: expiredIds,
     },
   });

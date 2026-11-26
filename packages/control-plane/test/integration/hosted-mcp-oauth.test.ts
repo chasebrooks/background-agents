@@ -18,6 +18,7 @@ import type { PersonalAccessTokenPolicy } from "@open-inspect/shared/types/perso
 import { hashToken } from "../../src/auth/crypto";
 import { OAuthAuthorizationCodeStore } from "../../src/db/oauth-authorization-codes";
 import { PersonalAccessTokenStore } from "../../src/db/personal-access-tokens";
+import { STEP_UP_REPLACEMENT_WINDOW_MS } from "../../src/oauth/authorization";
 import { s256CodeChallenge } from "../../src/oauth/pkce";
 import { TEST_CLIENT_ORIGIN } from "../fixtures/oauth-client-metadata";
 import { cleanD1Tables } from "./cleanup";
@@ -37,6 +38,7 @@ const CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
 const CLAUDE_CODE = "https://claude.ai/oauth/claude-code-client-metadata";
 const TEST_CLIENT = `${TEST_CLIENT_ORIGIN}/metadata`;
 const OWNER = "77777777777777777777777777777777";
+const VIEWER = "66666666666666666666666666666666";
 const ADMIN = { userId: "99999999999999999999999999999999", role: "administrator" } as const;
 
 /** The deployment as production configures it: the control plane knows its own public URL. */
@@ -103,18 +105,25 @@ async function check(request: OAuthAuthorizationRequest, userId = OWNER) {
 async function approve(
   request: OAuthAuthorizationRequest,
   permissions: PermissionId[] = ["sessions.read"],
-  expiresInDays = 30
+  expiresInDays = 30,
+  replacesTokenId: string | null = null
 ) {
-  return asUser("/oauth/authorize/approve", { request, permissions, expiresInDays });
+  return asUser("/oauth/authorize/approve", {
+    request,
+    permissions,
+    expiresInDays,
+    replacesTokenId,
+  });
 }
 
 /** Approve and return the code the browser would carry back to the client. */
 async function approvedCode(
   request: OAuthAuthorizationRequest,
   permissions?: PermissionId[],
-  expiresInDays?: number
+  expiresInDays?: number,
+  replacesTokenId: string | null = null
 ): Promise<string> {
-  const response = await approve(request, permissions, expiresInDays);
+  const response = await approve(request, permissions, expiresInDays, replacesTokenId);
   expect(response.status).toBe(200);
   const { redirectUrl } = await response.json<{ redirectUrl: string }>();
   const code = new URL(redirectUrl).searchParams.get("code");
@@ -129,9 +138,10 @@ function exchange(fields: Record<string, string>) {
 async function tokenFor(
   request: OAuthAuthorizationRequest,
   verifier: string,
-  permissions?: PermissionId[]
+  permissions?: PermissionId[],
+  replacesTokenId: string | null = null
 ): Promise<string> {
-  const code = await approvedCode(request, permissions);
+  const code = await approvedCode(request, permissions, undefined, replacesTokenId);
   const response = await exchange({
     grant_type: "authorization_code",
     code,
@@ -196,6 +206,24 @@ async function connect(token: string): Promise<Client> {
   const client = new Client({ name: "integration", version: "0" });
   await client.connect(transport);
   return client;
+}
+
+/** One raw `tools/call` on `/mcp`, to see the HTTP answer rather than a client's reading of it. */
+function callTool(token: string, name: string, args: Record<string, unknown>) {
+  return controlPlane("/mcp", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    }),
+  });
 }
 
 async function tokenRows(userId = OWNER) {
@@ -326,6 +354,7 @@ describe("OAuth sign-in", () => {
       redirect: { host: "claude.ai", loopback: false },
       requested: ["sessions.read"],
       maxLifetimeDays: 365,
+      replaces: null,
     });
     if (consent.kind !== "consent") throw new Error("unreachable");
     expect(consent.grantable).toContain("sessions.create");
@@ -521,7 +550,7 @@ describe("OAuth sign-in", () => {
       now: Date.now(),
       requestId: "integration",
       policyRevision: first.code.policyRevision,
-      oauth: { clientId: CLAUDE, codeHash, expiredTokenIds: [] },
+      oauth: { clientId: CLAUDE, codeHash, replacesTokenId: null, expiredTokenIds: [] },
     });
     expect(issued.kind).toBe("code_unavailable");
     expect(await tokenRows()).toEqual([]);
@@ -825,6 +854,221 @@ describe("OAuth sign-in", () => {
       redirect_uri: CLAUDE_CALLBACK,
     });
     await expect(unknown.json()).resolves.toMatchObject({ error: "invalid_grant" });
+  });
+});
+
+describe("OAuth step-up", () => {
+  it("answers a write with insufficient_scope naming every scope the connection needs", async () => {
+    const { sessionName } = await initSession({ userId: OWNER });
+    const token = await signIn(["sessions.read", "automations.read"]);
+
+    const response = await callTool(token, "send_prompt", {
+      session_id: sessionName,
+      content: "Write something",
+    });
+    expect(response.status).toBe(403);
+    const challenge = response.headers.get("WWW-Authenticate")!;
+    expect(challenge).toContain('error="insufficient_scope"');
+    expect(challenge).toContain(
+      `resource_metadata="${BASE}/.well-known/oauth-protected-resource/mcp"`
+    );
+    const scope = /scope="([^"]*)"/.exec(challenge)![1].split(" ");
+    // What it holds, plus what the call needs.
+    expect(scope.sort()).toEqual(["automations.read", "sessions.collaborate", "sessions.read"]);
+
+    // A read it holds is served as usual.
+    const read = await callTool(token, "get_session", { session_id: sessionName });
+    expect(read.status).toBe(200);
+  });
+
+  it("names a call's target in the scope it asks for", async () => {
+    const token = await signIn(["sessions.read"]);
+    const response = await callTool(token, "create_session", {
+      prompt: "Start",
+      environment_id: "env_1",
+    });
+    expect(response.status).toBe(403);
+    const scope = /scope="([^"]*)"/.exec(response.headers.get("WWW-Authenticate")!)![1];
+    expect(scope.split(" ")).toEqual(
+      expect.arrayContaining(["sessions.create", "sessions.collaborate", "environments.use"])
+    );
+    expect(scope.split(" ")).not.toContain("repositories.use");
+  });
+
+  it("gives a pasted token a tool error rather than a challenge", async () => {
+    const { sessionName } = await initSession({ userId: OWNER });
+    const token = await pastedToken(["sessions.read"]);
+    const response = await callTool(token, "send_prompt", {
+      session_id: sessionName,
+      content: "Write something",
+    });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain('"isError":true');
+    expect(text).toContain("sessions.collaborate");
+  });
+
+  it("does not challenge for a permission the policy would not let the user grant", async () => {
+    const { sessionName } = await initSession({ userId: OWNER });
+    const token = await signIn(["sessions.read"]);
+    await setPolicy({ allowedPermissions: ["sessions.read"] });
+    const response = await callTool(token, "send_prompt", {
+      session_id: sessionName,
+      content: "Write something",
+    });
+    // A challenge would send the user round the same refusal; the tool says what is missing.
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('"isError":true');
+  });
+
+  it("replaces exactly the token that was asked to step up, not another device's", async () => {
+    const { sessionName } = await initSession({ userId: OWNER });
+    // Two devices running the same app, one client id between them.
+    const deviceA = await signIn(["sessions.read"], CLAUDE_CODE);
+    const deviceB = await signIn(["sessions.read"], CLAUDE_CODE);
+    const claude = await signIn(["sessions.read"]);
+    const pasted = await pastedToken(["sessions.read"]);
+    const [rowA, rowB] = await tokenRows();
+    // B was used last, so "most recently used" would pick B; only the challenge decides.
+    await env.DB.prepare("UPDATE personal_access_tokens SET last_used_at = ? WHERE id = ?")
+      .bind(Date.now() + 60_000, rowB.id)
+      .run();
+
+    // Device A is refused a write, which marks its token.
+    const refused = await callTool(deviceA, "send_prompt", {
+      session_id: sessionName,
+      content: "Write something",
+    });
+    expect(refused.status).toBe(403);
+
+    const { request, verifier } = await authorizationRequest({
+      client_id: CLAUDE_CODE,
+      redirect_uri: "http://127.0.0.1:43123/callback",
+      scope: "sessions.read sessions.collaborate",
+    });
+    await expect(check(request)).resolves.toMatchObject({
+      kind: "consent",
+      replaces: {
+        id: rowA.id,
+        name: "Claude Code (claude.ai)",
+        displayPrefix: deviceA.slice(0, "oi_pat_".length + 6),
+      },
+    });
+    const steppedUp = await tokenFor(
+      request,
+      verifier,
+      ["sessions.read", "sessions.collaborate"],
+      rowA.id
+    );
+
+    const live = async (token: string) =>
+      (await controlPlane("/sessions", { headers: { Authorization: `Bearer ${token}` } })).status;
+    expect(await live(deviceA)).toBe(401);
+    for (const token of [deviceB, claude, pasted, steppedUp]) expect(await live(token)).toBe(200);
+    const replaced = await env.DB.prepare(
+      `SELECT resource_id, reason_code FROM authorization_audit_events
+        WHERE action = 'personal_access_token.revoked'`
+    ).all();
+    expect(replaced.results).toEqual([
+      { resource_id: rowA.id, reason_code: "oauth_step_up_replaced" },
+    ]);
+  });
+
+  it("replaces nothing when no token was asked to step up, or the user grants reads alone", async () => {
+    const { sessionName } = await initSession({ userId: OWNER });
+    const first = await signIn(["sessions.read"]);
+    const [row] = await tokenRows();
+    const stepUpRequest = async () =>
+      (await authorizationRequest({ scope: "sessions.read sessions.collaborate" })).request;
+
+    // Without a challenge from /mcp, a request for writes replaces nothing.
+    await expect(check(await stepUpRequest())).resolves.toMatchObject({ replaces: null });
+
+    await callTool(first, "send_prompt", { session_id: sessionName, content: "x" });
+    const request = await stepUpRequest();
+    await expect(check(request)).resolves.toMatchObject({ replaces: { id: row.id } });
+    // Choosing reads on the step-up consent replaces nothing, and must say so.
+    expect((await approve(request, ["sessions.read"], 30, row.id)).status).toBe(409);
+    expect((await approve(request, ["sessions.read"], 30, null)).status).toBe(200);
+    // A write grant must name the token the page showed.
+    const changed = await approve(request, ["sessions.read", "sessions.collaborate"], 30, null);
+    expect(changed.status).toBe(409);
+    await expect(changed.json()).resolves.toMatchObject({ code: "oauth_replacement_changed" });
+
+    // Past the window, a challenge no longer decides anything.
+    await env.DB.prepare(
+      "UPDATE personal_access_tokens SET oauth_step_up_requested_at = ? WHERE id = ?"
+    )
+      .bind(Date.now() - STEP_UP_REPLACEMENT_WINDOW_MS - 1, row.id)
+      .run();
+    await expect(check(await stepUpRequest())).resolves.toMatchObject({ replaces: null });
+
+    // Nor does an expired token's.
+    await env.DB.prepare(
+      "UPDATE personal_access_tokens SET oauth_step_up_requested_at = ?, expires_at = ? WHERE id = ?"
+    )
+      .bind(Date.now(), Date.now() - 1, row.id)
+      .run();
+    await expect(check(await stepUpRequest())).resolves.toMatchObject({ replaces: null });
+  });
+
+  it("never replaces a token made in Settings or another client's, whatever it is asked", async () => {
+    const pasted = await pastedToken(["sessions.read"]);
+    const otherClient = await signIn(["sessions.read"], CLAUDE_CODE);
+    const [pastedRow, otherRow] = await tokenRows();
+    const store = new PersonalAccessTokenStore(env.DB);
+    for (const target of [pastedRow.id, otherRow.id]) {
+      const { request } = await authorizationRequest();
+      const code = await approvedCode(request);
+      const issued = await store.issue({
+        userId: OWNER,
+        name: "step-up",
+        permissions: ["sessions.read"],
+        expiresAt: Date.now() + 60_000,
+        now: Date.now(),
+        requestId: "integration",
+        oauth: {
+          clientId: CLAUDE,
+          codeHash: await hashToken(code),
+          replacesTokenId: target,
+          expiredTokenIds: [],
+        },
+      });
+      expect(issued.kind).toBe("issued");
+    }
+    const live = async (token: string) =>
+      (await controlPlane("/sessions", { headers: { Authorization: `Bearer ${token}` } })).status;
+    expect(await live(pasted)).toBe(200);
+    expect(await live(otherClient)).toBe(200);
+  });
+
+  it("does not challenge for a permission the owner does not hold", async () => {
+    const { sessionName } = await initSession({ userId: OWNER });
+    // Sign in as a viewer, who can read sessions but not collaborate.
+    const { request, verifier } = await authorizationRequest();
+    const approved = await asUser(
+      "/oauth/authorize/approve",
+      { request, permissions: ["sessions.read"], expiresInDays: 7, replacesTokenId: null },
+      VIEWER,
+      "viewer"
+    );
+    expect(approved.status).toBe(200);
+    const { redirectUrl } = await approved.json<{ redirectUrl: string }>();
+    const response = await exchange({
+      grant_type: "authorization_code",
+      code: new URL(redirectUrl).searchParams.get("code")!,
+      code_verifier: verifier,
+      client_id: CLAUDE,
+      redirect_uri: CLAUDE_CALLBACK,
+    });
+    const { access_token: token } = await response.json<{ access_token: string }>();
+    const prompt = await callTool(token, "send_prompt", {
+      session_id: sessionName,
+      content: "Write something",
+    });
+    // The user could not grant it, so signing in again would only end at the same refusal.
+    expect(prompt.status).toBe(200);
+    expect(await prompt.text()).toContain('"isError":true');
   });
 });
 

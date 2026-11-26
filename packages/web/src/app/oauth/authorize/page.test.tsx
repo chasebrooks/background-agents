@@ -43,6 +43,7 @@ const CONSENT: OAuthConsentResponse = {
   grantable: ["sessions.read", "sessions.create", "sessions.collaborate"],
   readOnly: ["sessions.read"],
   maxLifetimeDays: 365,
+  replaces: null,
   denyUrl: "https://claude.ai/api/mcp/auth_callback?error=access_denied",
 };
 

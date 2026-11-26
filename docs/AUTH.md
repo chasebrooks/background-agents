@@ -587,21 +587,29 @@ tokens, not only `/mcp`.
 - **Flow.** Authorization code with PKCE (S256 only), public clients only, RFC 8707 resource
   indicators (`resource` must be the MCP server's URL), and the RFC 9207 `iss` response parameter.
   Scopes are grantable permission ids. Consent defaults to what the client asked for, which is the
-  reads the MCP tools use, and the member chooses the token's lifetime, capped by the policy. There
-  are no refresh tokens, and no revocation endpoint (RFC 7009): disconnecting in the client does not
-  revoke the token; the member revokes it under Access tokens. `resource` is checked at
-  authorization and exchange but not bound to the token, so the token works on every route that
-  accepts tokens, not only `/mcp`. That departs from the MCP specification's audience check,
-  deliberately: the token is the member's personal access token. Every issuance rule (tokens
-  enabled, lifetime, grantable, allowed, held now, prerequisites, the per-user cap) is checked when
-  the member approves, so a refusal shows on the consent page.
+  reads the MCP tools use unless it is stepping up, and the member chooses the token's lifetime,
+  capped by the policy. There are no refresh tokens, and no revocation endpoint (RFC 7009):
+  disconnecting in the client does not revoke the token; the member revokes it under Access tokens.
+  `resource` is checked at authorization and exchange but not bound to the token, so the token works
+  on every route that accepts tokens, not only `/mcp`. That departs from the MCP specification's
+  audience check, deliberately: the token is the member's personal access token. Every issuance rule
+  (tokens enabled, lifetime, grantable, allowed, held now, prerequisites, the per-user cap) is
+  checked when the member approves, so a refusal shows on the consent page.
 - **Codes.** An approval is stored as an authorization code (only its SHA-256 hash), bound to the
   member, client, redirect URI, PKCE challenge, resource, grant, lifetime, and policy revision, and
   valid for five minutes. The first presentation claims it atomically; a second marks it replayed,
   which revokes the token the first issued or stops one being issued. The exchange re-checks the
   policy revision and that the member is not suspended.
-- **Expired tokens.** The client's expired tokens are deleted when it is issued a new one, so they
-  never fill the per-user cap.
+- **Step-up.** When a token issued to a client lacks a permission a tool call needs, `/mcp` answers
+  `403` with `WWW-Authenticate: Bearer error="insufficient_scope"` and the full scope set the token
+  should hold, but only if the member holds the missing permissions now and the policy allows them;
+  otherwise the tool runs and reports what is missing. A token the member pasted into a client is
+  never challenged. The challenge marks the challenged token; a sign-in from the same client within
+  15 minutes whose approved grant includes a write replaces exactly that token, as the consent page
+  shows, and approval is refused if the token shown is no longer the one to replace. A grant of
+  reads alone, or a sign-in without a recent challenge, replaces nothing, since one client ID is
+  shared by every device. The client's expired tokens are deleted when it is issued a new one, so
+  they never fill the per-user cap.
 - **Off switch.** Turning MCP clients off refuses `/mcp`, OAuth sign-in, and every token issued
   through sign-in, on every route. Tokens members made in Settings keep working with the API.
 - **Abuse limits.** The consent page cannot be framed (`frame-ancestors 'none'`), approving requires

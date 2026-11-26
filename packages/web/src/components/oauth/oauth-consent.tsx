@@ -19,6 +19,7 @@ import {
   lifetimeChoices,
   lifetimeLabel,
 } from "@/lib/personal-access-token-lifetimes";
+import { formatLastUsed, formatTokenDate } from "@/lib/personal-access-token-display";
 import {
   handOffPermissions,
   personalAccessTokenPermissionLabel,
@@ -84,6 +85,13 @@ export function OAuthConsent({
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
 
+  // Only a grant that writes is a step-up, and only a step-up replaces the token that asked for it.
+  const replaces =
+    consent.replaces !== null &&
+    [...selected].some((permission) => !isPersonalAccessTokenReadOnlyPermission(permission))
+      ? consent.replaces
+      : null;
+
   const preset: Preset = sameSet(selected, readOnly)
     ? "read"
     : sameSet(selected, handOff)
@@ -105,6 +113,7 @@ export function OAuthConsent({
           request,
           permissions: grantable.filter((permission) => selected.has(permission)),
           expiresInDays,
+          replacesTokenId: replaces?.id ?? null,
         }),
       });
       const body: unknown = await response.json().catch(() => null);
@@ -143,6 +152,15 @@ export function OAuthConsent({
           This app returns to <span className="font-mono">{consent.redirect.host}</span> on your own
           device. Allow it only if you started this sign-in yourself, from an app you trust.
         </ErrorBanner>
+      )}
+
+      {replaces && (
+        <p role="note" className="rounded-md border border-border p-3 text-sm text-foreground">
+          This replaces your earlier connection from {consent.client.host}, which stops working:{" "}
+          {replaces.name}, <span className="font-mono">{replaces.displayPrefix}…</span>, created{" "}
+          {formatTokenDate(replaces.createdAt)}, {formatLastUsed(replaces.lastUsedAt).toLowerCase()}
+          .
+        </p>
       )}
 
       {failure && <ErrorBanner role="alert">{failure}</ErrorBanner>}

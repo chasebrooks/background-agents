@@ -38,6 +38,7 @@ const CONSENT: Consent = {
   ],
   readOnly: ["automations.read", "sessions.read"],
   maxLifetimeDays: 90,
+  replaces: null,
   denyUrl: "https://client.example/callback?error=access_denied&state=state-1",
 };
 
@@ -85,6 +86,7 @@ describe("OAuthConsent", () => {
       request: REQUEST,
       permissions: ["sessions.read"],
       expiresInDays: 30,
+      replacesTokenId: null,
     });
     await waitFor(() =>
       expect(assign).toHaveBeenCalledWith("https://client.example/callback?code=c&state=state-1")
@@ -161,6 +163,68 @@ describe("OAuthConsent", () => {
       "sessions.lifecycle",
       "sessions.read",
     ]);
+  });
+
+  it("replaces the connection that asked to step up only when the grant writes", async () => {
+    fetchMock.mockResolvedValue(Response.json({ redirectUrl: "https://client.example/callback" }));
+    const user = userEvent.setup();
+    const { unmount } = render(
+      <OAuthConsent
+        consent={{
+          ...CONSENT,
+          requested: ["sessions.collaborate", "sessions.read"],
+          replaces: {
+            id: "token-1",
+            name: "Example App (client.example)",
+            displayPrefix: "oi_pat_a1b2c3",
+            createdAt: Date.UTC(2026, 0, 2),
+            lastUsedAt: Date.now() - 5 * 60 * 1000,
+          },
+        }}
+        request={REQUEST}
+      />
+    );
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "This replaces your earlier connection from client.example"
+    );
+    // Two tokens of one app created the same day are told apart by prefix and last use.
+    expect(screen.getByRole("note")).toHaveTextContent("oi_pat_a1b2c3…");
+    expect(screen.getByRole("note")).toHaveTextContent("last used 5m ago");
+    expect(
+      screen.getByText(/Requested: Collaborate in sessions, Read sessions/)
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Allow" }));
+    expect(approvalBody()).toMatchObject({
+      permissions: ["sessions.collaborate", "sessions.read"],
+      replacesTokenId: "token-1",
+    });
+    unmount();
+
+    // Choosing reads alone is not a step-up: nothing is replaced.
+    fetchMock.mockClear();
+    render(
+      <OAuthConsent
+        consent={{
+          ...CONSENT,
+          requested: ["sessions.collaborate", "sessions.read"],
+          replaces: {
+            id: "token-1",
+            name: "x",
+            displayPrefix: "oi_pat_a1b2c3",
+            createdAt: 0,
+            lastUsedAt: null,
+          },
+        }}
+        request={REQUEST}
+      />
+    );
+    await user.click(screen.getByRole("radio", { name: /Read only/ }));
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Allow" }));
+    expect(approvalBody()).toMatchObject({
+      permissions: ["automations.read", "sessions.read"],
+      replacesTokenId: null,
+    });
   });
 
   it("warns that a loopback redirect returns to an app on this device", () => {

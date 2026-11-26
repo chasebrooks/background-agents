@@ -13,9 +13,10 @@ CREATE INDEX idx_personal_access_tokens_oauth_client
   ON personal_access_tokens(user_id, oauth_client_id)
   WHERE oauth_client_id IS NOT NULL;
 
--- When /mcp last answered this token with a step-up challenge. The sign-in that follows within a
--- short window replaces exactly this token, rather than guessing which of the client's tokens
--- (one per device) asked.
+-- When /mcp last answered this token with a step-up challenge. A sign-in from the same client
+-- within a short window replaces this token if it is the only one of the client's tokens (one
+-- per device) challenged then; with two or more, which device is signing in is unknown and none
+-- is replaced.
 ALTER TABLE personal_access_tokens ADD COLUMN oauth_step_up_requested_at INTEGER;
 
 -- The clients members may sign in to, as a JSON list of client ID metadata

@@ -114,8 +114,10 @@ function unauthorized(
  * would only send the user round the same refusal again.
  *
  * The challenge names everything the token should hold, its grant and what the call needs, since a
- * client may not carry an earlier step-up's scopes into the next. It also marks the token, so the
- * sign-in it starts replaces this token rather than another device's from the same app.
+ * client may not carry an earlier step-up's scopes into the next. It also marks the token: a
+ * sign-in from the same app within the window that grants a write replaces it, if it is the only
+ * one of that app's tokens marked then. With two or more marked, which device is signing in is
+ * unknown and none is replaced (OAuth carries nothing from the challenge to the sign-in).
  */
 async function stepUpChallenge(
   message: unknown,
@@ -129,13 +131,16 @@ async function stepUpChallenge(
   const call = toolCallOf(message);
   if (call === null) return null;
   const tool = TOOLS.find((candidate) => candidate.name === call.name);
-  if (!tool) return null;
-  const needed = [
-    ...tool.scopesFor(call.arguments),
-    ...((await tool.resolveScopes?.(client, call.arguments)) ?? []),
-  ];
+  // A call with invalid arguments would fail whatever the token held: it gets the tool's own
+  // error, not a sign-in that ends at the same failure.
+  if (!tool || !tool.acceptsArgs(call.arguments)) return null;
+  const resolved = await tool.resolveScopes?.(client, call.arguments, principal.grant);
+  const needed = [...tool.scopesFor(call.arguments), ...(resolved?.needed ?? [])];
   const missing = needed.filter((permission) => !principal.grant.includes(permission));
-  if (missing.length === 0) return null;
+  const lookUp = (resolved?.lookUp ?? []).filter(
+    (permission) => !principal.grant.includes(permission)
+  );
+  if (missing.length === 0 && lookUp.length === 0) return null;
   let held: readonly PermissionId[];
   try {
     held = (await new AuthorizationService(ctx.db).getEffectiveAuthorization(principal.userId))
@@ -144,19 +149,21 @@ async function stepUpChallenge(
     // An owner without a role holds nothing; the route the tool calls refuses them as usual.
     return null;
   }
-  const grantable = missing.every(
-    (permission) => held.includes(permission) && personalAccessTokenPolicyAllows(policy, permission)
+  const grantableNow = (permission: PermissionId) =>
+    held.includes(permission) && personalAccessTokenPolicyAllows(policy, permission);
+  if (!missing.every(grantableNow)) return null;
+  // What would let the next call look further is asked for only where the user can grant it.
+  const asked = [...missing, ...lookUp.filter(grantableNow)];
+  if (asked.length === 0) return null;
+  const scope = withGrantPrerequisites([...principal.grant, ...needed, ...asked]).filter(
+    (permission) => personalAccessTokenPolicyAllows(policy, permission)
   );
-  if (!grantable) return null;
-  const scope = withGrantPrerequisites([...principal.grant, ...needed]).filter((permission) =>
-    personalAccessTokenPolicyAllows(policy, permission)
-  );
-  // The sign-in this starts replaces exactly this token, not another device's from the same app.
+  // Marks this token as the one asking, for the sign-in this starts (see STEP_UP_REPLACEMENT_WINDOW_MS).
   await new PersonalAccessTokenStore(ctx.db).recordStepUpRequest(principal.tokenId, Date.now());
   const response = json(
     {
       error: "insufficient_scope",
-      error_description: `${tool.name} needs ${missing.join(", ")}, which this connection was not granted`,
+      error_description: `${tool.name} needs ${asked.join(", ")}, which this connection was not granted`,
     },
     403
   );
@@ -170,8 +177,14 @@ async function stepUpChallenge(
 /** The tool a `tools/call` message names, with its arguments; null for any other message. */
 function toolCallOf(message: unknown): { name: string; arguments: unknown } | null {
   if (typeof message !== "object" || message === null) return null;
-  const { method, params } = message as { method?: unknown; params?: unknown };
-  if (method !== "tools/call" || typeof params !== "object" || params === null) return null;
+  const { jsonrpc, method, params } = message as {
+    jsonrpc?: unknown;
+    method?: unknown;
+    params?: unknown;
+  };
+  // Only a JSON-RPC 2.0 request is a tool call; anything else is the MCP handler's to refuse.
+  if (jsonrpc !== "2.0" || method !== "tools/call") return null;
+  if (typeof params !== "object" || params === null) return null;
   const { name, arguments: args } = params as { name?: unknown; arguments?: unknown };
   return typeof name === "string" ? { name, arguments: args ?? {} } : null;
 }

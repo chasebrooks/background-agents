@@ -772,3 +772,48 @@ describe("tool scopes", () => {
     ).toEqual(["automations.create", "sessions.create", "environments.use"]);
   });
 });
+
+describe("trigger_automation scope lookup", () => {
+  const trigger = TOOLS.find((tool) => tool.name === "trigger_automation")!;
+  const automation = {
+    automation: { repositories: [{ repoOwner: "acme", repoName: "web" }], environmentIds: [] },
+  };
+
+  it("does not look when the token already holds both use permissions", async () => {
+    const { client, get } = fakeClient({ get: () => automation });
+    await expect(
+      trigger.resolveScopes!(client, { automation_id: "a" }, [
+        "automations.read",
+        "repositories.use",
+        "environments.use",
+      ])
+    ).resolves.toEqual({ needed: [], lookUp: [] });
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("asks for automations.read, without looking, when the token cannot read it", async () => {
+    const { client, get } = fakeClient({ get: () => automation });
+    await expect(
+      trigger.resolveScopes!(client, { automation_id: "a" }, ["automations.trigger.own"])
+    ).resolves.toEqual({ needed: [], lookUp: ["automations.read"] });
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("names the use permission the automation's targets need", async () => {
+    const { client, get } = fakeClient({ get: () => automation });
+    await expect(
+      trigger.resolveScopes!(client, { automation_id: "a" }, ["automations.read"])
+    ).resolves.toEqual({ needed: ["repositories.use"], lookUp: [] });
+    expect(get).toHaveBeenCalledWith("/automations/a");
+  });
+
+  it("finds out nothing for arguments the tool refuses", async () => {
+    const { client, get } = fakeClient({ get: () => automation });
+    expect(trigger.acceptsArgs({})).toBe(false);
+    await expect(trigger.resolveScopes!(client, {}, ["automations.read"])).resolves.toEqual({
+      needed: [],
+      lookUp: [],
+    });
+    expect(get).not.toHaveBeenCalled();
+  });
+});

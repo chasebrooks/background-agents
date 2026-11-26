@@ -1161,6 +1161,80 @@ describe("OAuth step-up", () => {
     ).toBe(200);
   });
 
+  it("gives a call with invalid arguments the tool's error, not a step-up", async () => {
+    const { sessionName } = await initSession({ userId: OWNER });
+    const token = await signIn(["sessions.read"]);
+    // send_prompt needs content: no grant would make this call succeed.
+    const response = await callTool(token, "send_prompt", { session_id: sessionName });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('"isError":true');
+    const stamped = await env.DB.prepare(
+      "SELECT oauth_step_up_requested_at AS at FROM personal_access_tokens WHERE id = ?"
+    )
+      .bind(await rowIdOf(token))
+      .first<{ at: number | null }>();
+    expect(stamped?.at).toBeNull();
+  });
+
+  it("examines only a JSON-RPC 2.0 tools/call for step-up", async () => {
+    const { sessionName } = await initSession({ userId: OWNER });
+    const token = await signIn(["sessions.read"]);
+    const call = (envelope: Record<string, unknown>) =>
+      controlPlane("/mcp", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          ...envelope,
+          id: 1,
+          method: "tools/call",
+          params: { name: "send_prompt", arguments: { session_id: sessionName, content: "x" } },
+        }),
+      });
+    const stampedAt = async () =>
+      (
+        await env.DB.prepare(
+          "SELECT oauth_step_up_requested_at AS at FROM personal_access_tokens WHERE id = ?"
+        )
+          .bind(await rowIdOf(token))
+          .first<{ at: number | null }>()
+      )?.at ?? null;
+
+    // Without the envelope it is not a tool call: the MCP handler refuses it, and nothing is marked.
+    const malformed = await call({});
+    expect(malformed.status).not.toBe(403);
+    expect(await stampedAt()).toBeNull();
+    const notTwo = await call({ jsonrpc: "1.0" });
+    expect(notTwo.status).not.toBe(403);
+    expect(await stampedAt()).toBeNull();
+
+    const wellFormed = await call({ jsonrpc: "2.0" });
+    expect(wellFormed.status).toBe(403);
+    expect(await stampedAt()).not.toBeNull();
+  });
+
+  it("asks for automations.read when the token cannot read the automation it triggers", async () => {
+    const automationId = "automation-unreadable";
+    await new AutomationStore(env.DB).create(
+      makeAutomation({ id: automationId, created_by: OWNER, user_id: OWNER })
+    );
+    const token = await signIn(["automations.trigger.own", "sessions.create"]);
+    const response = await callTool(token, "trigger_automation", { automation_id: automationId });
+    expect(response.status).toBe(403);
+    const scope = /scope="([^"]*)"/.exec(response.headers.get("WWW-Authenticate")!)![1].split(" ");
+    expect(scope).toEqual(
+      expect.arrayContaining(["automations.read", "automations.trigger.own", "sessions.create"])
+    );
+
+    // A pasted token with the same grant is never asked; the trigger route answers it.
+    const pasted = await pastedToken(["automations.trigger.own", "sessions.create"]);
+    const refused = await callTool(pasted, "trigger_automation", { automation_id: automationId });
+    expect(refused.status).toBe(200);
+  });
+
   it("asks to step up to an automation's target use when triggering it", async () => {
     const automationId = "automation-step-up";
     await new AutomationStore(env.DB).create(

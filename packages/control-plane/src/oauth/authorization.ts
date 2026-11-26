@@ -234,7 +234,7 @@ function tokenName(clientId: string, clientName: string | null): string {
 
 /**
  * How long after `/mcp` asks a client to step up the sign-in that follows replaces the token it
- * asked about. Long enough for the user to read the consent page; short enough that a later,
+ * asked about (when only one was asked; see `ClientTokens.stepUp`). Long enough for the user to read the consent page; short enough that a later,
  * unrelated sign-in from the same client replaces nothing.
  */
 export const STEP_UP_REPLACEMENT_WINDOW_MS = 15 * 60 * 1000;

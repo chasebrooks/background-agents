@@ -80,12 +80,18 @@ export interface ToolDefinition {
    * the tool calls names the other if it is the one needed.
    */
   scopesFor(args: unknown): readonly PermissionId[];
+  /** Whether `args` are valid for this tool: a call that is not would fail whatever it held. */
+  acceptsArgs(args: unknown): boolean;
   /**
    * Permissions a call needs that only the control plane knows, looked up through `client` with
-   * the caller's own token: the use permission for the targets of an automation it triggers. Empty
-   * when the lookup is refused, and the route the tool calls then names what is missing.
+   * the caller's own token, whose grant is `grant`: the use permission for the targets of an
+   * automation it triggers. When the token cannot look them up, `lookUp` names what would let it.
    */
-  resolveScopes?(client: ControlPlaneClient, args: unknown): Promise<readonly PermissionId[]>;
+  resolveScopes?(
+    client: ControlPlaneClient,
+    args: unknown,
+    grant: readonly PermissionId[]
+  ): Promise<ResolvedScopes>;
   /** Drives the MCP `readOnlyHint`, a hint a client may use to decide what to prompt for. */
   readOnly: boolean;
   /**
@@ -99,10 +105,21 @@ export interface ToolDefinition {
   run(client: ControlPlaneClient, args: unknown): Promise<unknown>;
 }
 
+/**
+ * What a lookup found a call needs (`needed`), or, when the token could not look, what would let
+ * it (`lookUp`): asked for only if the user can grant it, so the next call can look and ask again.
+ */
+export interface ResolvedScopes {
+  readonly needed: readonly PermissionId[];
+  readonly lookUp: readonly PermissionId[];
+}
+
+const NOTHING_RESOLVED: ResolvedScopes = { needed: [], lookUp: [] };
+
 /** A tool as it is written: its handler receives exactly what its schema produces. */
 interface ToolSpec<Shape extends z.ZodRawShape> extends Omit<
   ToolDefinition,
-  "inputSchema" | "run" | "scopesFor" | "requires" | "resolveScopes"
+  "inputSchema" | "run" | "scopesFor" | "requires" | "resolveScopes" | "acceptsArgs"
 > {
   inputSchema: Shape;
   /** The permissions every call needs. `requires` is written from these. */
@@ -112,8 +129,9 @@ interface ToolSpec<Shape extends z.ZodRawShape> extends Omit<
   /** Further permissions a call needs for targets the control plane must look up. */
   resolveScopes?(
     client: ControlPlaneClient,
-    args: z.output<z.ZodObject<Shape>>
-  ): Promise<readonly PersonalAccessTokenGrantablePermission[]>;
+    args: z.output<z.ZodObject<Shape>>,
+    grant: readonly PermissionId[]
+  ): Promise<ResolvedScopes>;
   /** Further permissions a call needs for the targets its arguments name. */
   targetScopes?(
     args: z.output<z.ZodObject<Shape>>
@@ -133,13 +151,18 @@ function defineTool<const Shape extends z.ZodRawShape>(spec: ToolSpec<Shape>): T
     ...rest,
     ...(resolveScopes
       ? {
-          resolveScopes: async (client: ControlPlaneClient, args: unknown) => {
+          resolveScopes: async (
+            client: ControlPlaneClient,
+            args: unknown,
+            grant: readonly PermissionId[]
+          ) => {
             const parsed = schema.safeParse(args);
-            return parsed.success ? resolveScopes(client, parsed.data) : [];
+            return parsed.success ? resolveScopes(client, parsed.data, grant) : NOTHING_RESOLVED;
           },
         }
       : {}),
     requires: alternatives ? `${listed(scopes)}, plus ${alternatives}` : listed(scopes),
+    acceptsArgs: (args) => schema.safeParse(args).success,
     scopesFor: (args) => {
       // Arguments that do not parse name no target; the call fails on them before any route.
       const parsed = targetScopes ? schema.safeParse(args) : null;
@@ -814,20 +837,29 @@ export const TOOLS: ToolDefinition[] = [
   defineTool({
     name: "trigger_automation",
     scopes: ["automations.trigger.own", "sessions.create"],
-    resolveScopes: async (client, args) => {
+    resolveScopes: async (client, args, grant) => {
+      // Holding both use permissions, whatever the targets are, there is nothing to find out.
+      if (grant.includes("repositories.use") && grant.includes("environments.use")) {
+        return NOTHING_RESOLVED;
+      }
+      // Without automations.read the automation cannot be read, so ask for that; once granted,
+      // the next call reads it and asks for the use permission its targets need.
+      if (!grant.includes("automations.read")) {
+        return { needed: [], lookUp: ["automations.read"] };
+      }
       try {
         const found = automationTargetsSchema.safeParse(
           await client.get(`/automations/${encodeURIComponent(args.automation_id)}`)
         );
-        return found.success
-          ? targetUse({
-              repository: found.data.automation.repositories.length > 0,
-              environment: found.data.automation.environmentIds.length > 0,
-            })
-          : [];
+        if (!found.success) return NOTHING_RESOLVED;
+        const needed = targetUse({
+          repository: found.data.automation.repositories.length > 0,
+          environment: found.data.automation.environmentIds.length > 0,
+        });
+        return { needed, lookUp: [] };
       } catch {
-        // Unreadable to this token (it lacks automations.read) or gone: the trigger route says so.
-        return [];
+        // Not readable to this owner, or gone: the trigger route says so.
+        return NOTHING_RESOLVED;
       }
     },
     alternatives:

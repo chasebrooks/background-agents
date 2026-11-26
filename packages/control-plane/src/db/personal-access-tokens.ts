@@ -396,8 +396,9 @@ export class PersonalAccessTokenStore {
   }
 
   /**
-   * Records that `/mcp` just asked this token's client to step up, so the sign-in that follows
-   * replaces exactly this token. Only a token issued through sign-in is ever marked.
+   * Records that `/mcp` just asked this token's client to step up. A sign-in from the same client
+   * within the window replaces it if it is the only one of the client's tokens so marked. Only a
+   * token issued through sign-in is ever marked.
    */
   async recordStepUpRequest(tokenId: string, at: number): Promise<void> {
     await this.db

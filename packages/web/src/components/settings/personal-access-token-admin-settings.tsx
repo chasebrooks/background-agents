@@ -4,6 +4,8 @@ import { useState } from "react";
 import { useNow } from "@/hooks/use-now";
 import { toast } from "sonner";
 import {
+  DEFAULT_OAUTH_CLIENT_IDS,
+  isOAuthClientIdUrl,
   isPersonalAccessTokenGrantable,
   PERSONAL_ACCESS_TOKEN_GRANTABLE_PERMISSIONS,
   personalAccessTokenEffectiveExpiry,
@@ -24,6 +26,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { RadioCard } from "@/components/ui/form-controls";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -68,16 +71,26 @@ function ownerLabel(owner: WorkspacePersonalAccessToken["owner"]): string {
 }
 
 /**
- * The rules of a policy snapshot, without its revision and authorship. The MCP switch is left out
- * when the control plane did not send it, so saving never names a field it would refuse.
+ * The rules of a policy snapshot, without its revision and authorship. The MCP switch and the
+ * OAuth app list are left out when the control plane did not send them, so saving never names a
+ * field it would refuse.
  */
 function rulesOf(policy: WorkspaceApiPolicy): PersonalAccessTokenPolicy {
   return {
     enabled: policy.enabled,
     ...(policy.mcpEnabled === undefined ? {} : { mcpEnabled: policy.mcpEnabled }),
+    ...(policy.oauthClientIds === undefined ? {} : { oauthClientIds: policy.oauthClientIds }),
     maxLifetimeDays: policy.maxLifetimeDays,
     allowedPermissions: policy.allowedPermissions,
   };
+}
+
+/** One client ID per line, as an administrator types them. */
+function parseOAuthClientIds(text: string): string[] {
+  return text
+    .split(/\s+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 function samePolicy(a: PersonalAccessTokenPolicy, b: PersonalAccessTokenPolicy): boolean {
@@ -130,6 +143,11 @@ function PolicySection() {
     if (!editing) return;
     if (editing.draft.enabled && editing.draft.allowedPermissions?.length === 0) {
       toast.error("Allow at least one permission, or turn tokens off instead");
+      return;
+    }
+    const invalidClient = editing.draft.oauthClientIds?.find((id) => !isOAuthClientIdUrl(id));
+    if (invalidClient !== undefined) {
+      toast.error(`${invalidClient} is not the HTTPS URL of an app's client metadata document`);
       return;
     }
     setSaving(true);
@@ -200,7 +218,9 @@ function PolicySection() {
                 ) : (
                   "Members connect an MCP client to the control plane's /mcp with an access token. "
                 )}
-                Off refuses MCP; tokens keep working with the API.
+                Members can also sign an MCP client in with OAuth, which issues it an access token.
+                Off refuses MCP and OAuth sign-in, and stops every token issued through sign-in;
+                tokens made in Settings keep working with the API.
               </p>
             </div>
             <Switch
@@ -209,6 +229,14 @@ function PolicySection() {
               onCheckedChange={(mcpEnabled) => edit({ ...draft, mcpEnabled })}
             />
           </div>
+        )}
+
+        {draft.mcpEnabled !== undefined && draft.oauthClientIds !== undefined && (
+          <OAuthClientsField
+            clientIds={draft.oauthClientIds}
+            disabled={!draft.mcpEnabled}
+            onChange={(oauthClientIds) => edit({ ...draft, oauthClientIds })}
+          />
         )}
 
         <fieldset>
@@ -282,6 +310,64 @@ function PolicySection() {
         </div>
       </fieldset>
     </section>
+  );
+}
+
+/**
+ * The apps members may sign in to with OAuth, each named by the URL of its client ID metadata
+ * document. Only these are ever fetched, so the list is also what this deployment will contact.
+ */
+function OAuthClientsField({
+  clientIds,
+  disabled,
+  onChange,
+}: {
+  clientIds: string[] | null;
+  disabled: boolean;
+  onChange: (clientIds: string[] | null) => void;
+}) {
+  // The text as typed, so a half-typed line is not reformatted under the cursor.
+  const [text, setText] = useState(() => (clientIds ?? DEFAULT_OAUTH_CLIENT_IDS).join("\n"));
+  return (
+    <fieldset disabled={disabled}>
+      <legend className="text-sm font-medium text-foreground">Apps that can sign in</legend>
+      <p className="text-xs text-muted-foreground">
+        MCP clients identify themselves by the URL of a client metadata document. Members can sign
+        in only the apps listed here.
+      </p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <RadioCard
+          name="oauth-clients"
+          label="Claude (default)"
+          description="claude.ai, Claude Desktop and mobile, and Claude Code"
+          checked={clientIds === null}
+          onChange={() => onChange(null)}
+        />
+        <RadioCard
+          name="oauth-clients"
+          label="Only these apps"
+          checked={clientIds !== null}
+          onChange={() => onChange(parseOAuthClientIds(text))}
+        />
+      </div>
+      {clientIds !== null && (
+        <div className="mt-3">
+          <label htmlFor="oauth-client-ids" className="text-xs text-muted-foreground">
+            Client metadata document URLs, one per line
+          </label>
+          <Textarea
+            id="oauth-client-ids"
+            className="mt-1 font-mono text-xs"
+            rows={4}
+            value={text}
+            onChange={(event) => {
+              setText(event.target.value);
+              onChange(parseOAuthClientIds(event.target.value));
+            }}
+          />
+        </div>
+      )}
+    </fieldset>
   );
 }
 

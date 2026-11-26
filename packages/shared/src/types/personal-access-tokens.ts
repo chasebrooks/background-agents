@@ -271,6 +271,69 @@ export type ListPersonalAccessTokensResponse = z.infer<
 >;
 
 /**
+ * The apps members may sign in to with OAuth when none are configured: Claude's hosted apps
+ * (claude.ai, Desktop, mobile) and Claude Code, by the URLs of their client ID metadata documents.
+ */
+export const DEFAULT_OAUTH_CLIENT_IDS: readonly string[] = [
+  "https://claude.ai/oauth/mcp-oauth-client-metadata",
+  "https://claude.ai/oauth/claude-code-client-metadata",
+];
+
+/** Most apps the API policy may list as able to sign in with OAuth. */
+export const OAUTH_CLIENT_IDS_MAX = 20;
+
+const OAUTH_CLIENT_ID_MAX_LENGTH = 2048;
+
+/** Host suffixes that name a machine on a private network rather than a public site. */
+const PRIVATE_HOST_SUFFIXES = [".localhost", ".local", ".internal", ".lan", ".home.arpa"];
+
+/**
+ * Whether a hostname names a public site: not an IP address, not a single-label name, and not a
+ * private-network name. The control plane fetches a listed client's document, so a listed URL must
+ * not point it at its own network.
+ */
+function isPublicHostname(hostname: string): boolean {
+  if (hostname.startsWith("[") || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return false;
+  if (!hostname.includes(".") || hostname === "localhost") return false;
+  return !PRIVATE_HOST_SUFFIXES.some((suffix) => hostname.endsWith(suffix));
+}
+
+/**
+ * Whether a string can name an OAuth client by its client ID metadata document: an HTTPS URL on a
+ * public hostname with a path, no fragment, no credentials, and no dot segments, written exactly as
+ * a URL parser would write it back, so a client ID compares by plain string equality.
+ */
+export function isOAuthClientIdUrl(value: string): boolean {
+  if (value.length > OAUTH_CLIENT_ID_MAX_LENGTH) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    url.protocol === "https:" &&
+    url.href === value &&
+    url.pathname !== "/" &&
+    url.hash === "" &&
+    !value.includes("#") &&
+    url.username === "" &&
+    url.password === "" &&
+    isPublicHostname(url.hostname) &&
+    !/\/\.{1,2}(\/|$)/.test(url.pathname)
+  );
+}
+
+const oauthClientIdsSchema = z
+  .array(
+    z.string().refine(isOAuthClientIdUrl, {
+      message: "An app is named by the HTTPS URL of its client ID metadata document",
+    })
+  )
+  .max(OAUTH_CLIENT_IDS_MAX)
+  .refine((ids) => new Set(ids).size === ids.length, { message: "An app is listed twice" });
+
+/**
  * The workspace's rules for personal access tokens, set by holders of
  * `workspace.personal_access_tokens.manage`. They apply to existing tokens at once, not only to new
  * ones: disabling refuses every token, a lower lifetime cap expires older tokens early, and a
@@ -284,6 +347,11 @@ export const personalAccessTokenPolicySchema = z.strictObject({
    * client that predates it cannot turn it back on by saving the rest of the policy.
    */
   mcpEnabled: z.boolean().optional(),
+  /**
+   * The apps members may sign in to with OAuth, each named by its client ID metadata document URL.
+   * Null: DEFAULT_OAUTH_CLIENT_IDS. Optional on a write, like `mcpEnabled`.
+   */
+  oauthClientIds: oauthClientIdsSchema.nullable().optional(),
   /** Days a token may live, counted from issue. Null: PERSONAL_ACCESS_TOKEN_MAX_LIFETIME_DAYS. */
   maxLifetimeDays: z
     .number()
@@ -299,6 +367,7 @@ export type PersonalAccessTokenPolicy = z.infer<typeof personalAccessTokenPolicy
 /** The policy as administrators edit it: the rules plus the revision an update must name. */
 export const personalAccessTokenPolicySnapshotSchema = personalAccessTokenPolicySchema.extend({
   mcpEnabled: z.boolean(),
+  oauthClientIds: oauthClientIdsSchema.nullable(),
   revision: z.number().int().nonnegative(),
   updatedAt: z.number().nullable(),
   updatedByUserId: z.string().nullable(),
@@ -310,6 +379,13 @@ export type PersonalAccessTokenPolicySnapshot = z.infer<
 /** The longest lifetime, in days, the policy allows a token. */
 export function personalAccessTokenMaxLifetimeDays(policy: PersonalAccessTokenPolicy): number {
   return policy.maxLifetimeDays ?? PERSONAL_ACCESS_TOKEN_MAX_LIFETIME_DAYS;
+}
+
+/** The apps the policy lets members sign in to with OAuth. */
+export function personalAccessTokenOAuthClientIds(
+  policy: PersonalAccessTokenPolicy
+): readonly string[] {
+  return policy.oauthClientIds ?? DEFAULT_OAUTH_CLIENT_IDS;
 }
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;

@@ -39,6 +39,8 @@ export interface PersonalAccessTokenCredential {
   readonly expiresAt: number;
   /** Registered permissions only; a grant naming a since-removed permission ignores it. */
   readonly grant: readonly PermissionId[];
+  /** The OAuth client the token was issued to through sign-in; null for one made in Settings. */
+  readonly oauthClientId: string | null;
 }
 
 export interface IssuePersonalAccessTokenInput {
@@ -380,7 +382,7 @@ export class PersonalAccessTokenStore {
     const { results } = await this.db
       .prepare(
         `SELECT token.id, token.user_id, token.display_prefix, token.created_at, token.expires_at,
-                grant_row.permission_id
+                token.oauth_client_id, grant_row.permission_id
            FROM personal_access_tokens token
            LEFT JOIN personal_access_token_permissions grant_row ON grant_row.token_id = token.id
           WHERE token.token_hash = ?`
@@ -392,6 +394,7 @@ export class PersonalAccessTokenStore {
         display_prefix: string;
         created_at: number;
         expires_at: number;
+        oauth_client_id: string | null;
         permission_id: string | null;
       }>();
     const row = results[0];
@@ -402,6 +405,7 @@ export class PersonalAccessTokenStore {
       displayPrefix: row.display_prefix,
       createdAt: row.created_at,
       expiresAt: row.expires_at,
+      oauthClientId: row.oauth_client_id,
       grant: canonicalGrant(
         results.flatMap(({ permission_id }) =>
           permission_id !== null && isRegisteredPermission(permission_id) ? [permission_id] : []

@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { PERMISSION_IDS, permissionsForBuiltInRole } from "../rbac";
 import {
+  DEFAULT_OAUTH_CLIENT_IDS,
+  isOAuthClientIdUrl,
   isPersonalAccessTokenReadOnlyPermission,
   PERSONAL_ACCESS_TOKEN_PERMISSION_ACCESS,
+  personalAccessTokenOAuthClientIds,
   PERSONAL_ACCESS_TOKEN_GRANT_PREREQUISITES,
   PERSONAL_ACCESS_TOKEN_GRANTABLE_PERMISSIONS,
   PERSONAL_ACCESS_TOKEN_MAX_LIFETIME_DAYS,
@@ -184,5 +187,61 @@ describe("read-only permissions", () => {
       const readShaped = permission.endsWith(".read") || permission === "sessions.export";
       expect(isPersonalAccessTokenReadOnlyPermission(permission), permission).toBe(readShaped);
     }
+  });
+});
+
+describe("OAuth client ids", () => {
+  it.each([
+    "https://claude.ai/oauth/mcp-oauth-client-metadata",
+    "https://client.example/oauth/metadata?v=1",
+    ...DEFAULT_OAUTH_CLIENT_IDS,
+  ])("accepts %s", (value) => {
+    expect(isOAuthClientIdUrl(value)).toBe(true);
+  });
+
+  it.each([
+    ["plain HTTP", "http://client.example/metadata"],
+    ["no path", "https://client.example"],
+    ["the root path", "https://client.example/"],
+    ["a fragment", "https://client.example/metadata#x"],
+    ["an empty fragment", "https://client.example/metadata#"],
+    ["credentials", "https://user:pass@client.example/metadata"],
+    ["a dot segment", "https://client.example/a/../metadata"],
+    ["an uppercase host a parser rewrites", "https://Client.example/metadata"],
+    ["not a URL", "client.example/metadata"],
+    ["an over-long URL", `https://client.example/${"a".repeat(2100)}`],
+    ["an IPv4 address", "https://10.0.0.1/metadata"],
+    ["an IPv4 address in another notation", "https://0x7f.1/metadata"],
+    ["an IPv6 address", "https://[::1]/metadata"],
+    ["localhost", "https://localhost/metadata"],
+    ["a localhost subdomain", "https://app.localhost/metadata"],
+    ["a single-label name", "https://intranet/metadata"],
+    ["a private-network name", "https://metadata.internal/client"],
+    ["an mDNS name", "https://printer.local/client"],
+  ])("refuses %s", (_label, value) => {
+    expect(isOAuthClientIdUrl(value)).toBe(false);
+  });
+
+  it("is optional on a write and defaults to Claude's apps", () => {
+    const rules = { enabled: true, maxLifetimeDays: null, allowedPermissions: null };
+    expect(personalAccessTokenPolicySchema.parse(rules).oauthClientIds).toBeUndefined();
+    expect(personalAccessTokenOAuthClientIds({ ...rules, oauthClientIds: null })).toEqual(
+      DEFAULT_OAUTH_CLIENT_IDS
+    );
+    expect(
+      personalAccessTokenOAuthClientIds({ ...rules, oauthClientIds: ["https://a.example/m"] })
+    ).toEqual(["https://a.example/m"]);
+    expect(
+      personalAccessTokenPolicySchema.safeParse({
+        ...rules,
+        oauthClientIds: ["https://a.example/m", "https://a.example/m"],
+      }).success
+    ).toBe(false);
+    expect(
+      personalAccessTokenPolicySchema.safeParse({
+        ...rules,
+        oauthClientIds: Array.from({ length: 21 }, (_, index) => `https://a.example/${index}`),
+      }).success
+    ).toBe(false);
   });
 });

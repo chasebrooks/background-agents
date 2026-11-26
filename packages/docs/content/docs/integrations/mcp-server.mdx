@@ -23,6 +23,8 @@ The OpenInspect MCP server lets an MCP client such as Claude or Claude Code read
 
 Add the server's URL to your client and sign in when it asks. Administrators find the exact URL under **Settings › API policy**; it is your control plane's URL followed by `/mcp`.
 
+![Settings, API policy: the Allow MCP clients switch with the MCP server's URL, the apps that can sign in, the longest token lifetime, and the permissions tokens may hold](/images/administration/api-policy.webp "Settings › API policy. The MCP server's URL is under Allow MCP clients.")
+
 - **Claude** (claude.ai, Desktop, and mobile): add a custom connector with the URL.
 - **Claude Code**:
 
@@ -43,6 +45,20 @@ Then choose how long the connection lasts, up to your workspace's lifetime cap, 
 The token works wherever a personal access token does, not only at `/mcp`: the app could call the API directly with it, within the same grant.
 
 When a read-only connection tries something it isn't allowed to do, such as sending a prompt, and you could grant it, the client asks you to sign in again for more access, with the extra permissions selected. If you approve within 15 minutes with any write permission, the new token replaces the one that was refused, and the page says which. Choosing **Read only** replaces nothing. Tokens on your other devices are untouched. If more than one of your devices was refused in that time, OpenInspect cannot tell which one is signing in, so it replaces none of them; revoke the old ones under **Settings › Access tokens** if you no longer need them.
+
+```mermaid
+flowchart TB
+    accTitle: Signing an MCP client in, and stepping up for more
+    connect["Add the /mcp URL<br/>to the client"] --> challenge401["/mcp answers 401<br/>and asks for reads"]
+    challenge401 --> consent["Consent page:<br/>Read only by default"]
+    consent -- "Allow" --> token["The client gets<br/>a token with<br/>that grant"]
+    token --> call["The client<br/>calls a tool"]
+    call -- "the token holds<br/>what it needs" --> runs["The tool runs"]
+    call -- "it lacks a write<br/>you could grant" --> challenge403["/mcp answers 403<br/>and marks this token"]
+    challenge403 --> stepup["Consent page again,<br/>the writes selected"]
+    stepup -- "Allow with a write,<br/>within 15 minutes" --> replace["New token; the marked<br/>token is revoked if it<br/>was the only one marked"]
+    stepup -- "Allow with Read only" --> keep["New token;<br/>nothing is replaced"]
+```
 
 Only apps your workspace allows can sign in. By default these are Claude's apps; an administrator can change the list under **Settings › API policy**.
 

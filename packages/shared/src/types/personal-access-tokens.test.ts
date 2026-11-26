@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { PERMISSION_IDS, permissionsForBuiltInRole } from "../rbac";
 import {
+  isPersonalAccessTokenReadOnlyPermission,
+  PERSONAL_ACCESS_TOKEN_PERMISSION_ACCESS,
   PERSONAL_ACCESS_TOKEN_GRANT_PREREQUISITES,
   PERSONAL_ACCESS_TOKEN_GRANTABLE_PERMISSIONS,
   PERSONAL_ACCESS_TOKEN_MAX_LIFETIME_DAYS,
@@ -164,5 +166,23 @@ describe("personal access token policy", () => {
     ["a missing switch", { maxLifetimeDays: null, allowedPermissions: null }],
   ])("rejects %s", (_label, policy) => {
     expect(personalAccessTokenPolicySchema.safeParse(policy).success).toBe(false);
+  });
+});
+
+describe("read-only permissions", () => {
+  it("classifies every grantable permission, and no withheld one", () => {
+    expect(Object.keys(PERSONAL_ACCESS_TOKEN_PERMISSION_ACCESS).sort()).toEqual(
+      [...PERSONAL_ACCESS_TOKEN_GRANTABLE_PERMISSIONS].sort()
+    );
+    expect(isPersonalAccessTokenReadOnlyPermission("sessions.read")).toBe(true);
+    expect(isPersonalAccessTokenReadOnlyPermission("sessions.collaborate")).toBe(false);
+    expect(isPersonalAccessTokenReadOnlyPermission("workspace.members.manage")).toBe(false);
+  });
+
+  it("names only reads by a read-shaped id, and every read-shaped id as a read", () => {
+    for (const permission of PERSONAL_ACCESS_TOKEN_GRANTABLE_PERMISSIONS) {
+      const readShaped = permission.endsWith(".read") || permission === "sessions.export";
+      expect(isPersonalAccessTokenReadOnlyPermission(permission), permission).toBe(readShaped);
+    }
   });
 });

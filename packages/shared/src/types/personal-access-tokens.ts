@@ -116,6 +116,55 @@ export function isPersonalAccessTokenGrantable(
   return PERSONAL_ACCESS_TOKEN_GRANTABILITY[permission] === "grantable";
 }
 
+/**
+ * Whether each grantable permission only reads. Exhaustive, so making a permission grantable does
+ * not compile until someone decides which it is. A grant of reads alone can change nothing: it is
+ * the read-only choice when issuing a token, and what an MCP client signing in with OAuth is
+ * granted unless the user chooses more.
+ */
+export const PERSONAL_ACCESS_TOKEN_PERMISSION_ACCESS = {
+  "analytics.read": "read",
+  "automations.create": "write",
+  "automations.manage.any": "write",
+  "automations.manage.own": "write",
+  "automations.read": "read",
+  "automations.trigger.any": "write",
+  "automations.trigger.own": "write",
+  "environments.read": "read",
+  "environments.use": "write",
+  "image_builds.read": "read",
+  "integrations.read": "read",
+  "mcp_servers.read": "read",
+  "memories.manage_own": "write",
+  "provider_accounts.read": "read",
+  "repositories.read": "read",
+  "repositories.use": "write",
+  "sessions.bulk_archive": "write",
+  "sessions.collaborate": "write",
+  "sessions.create": "write",
+  "sessions.delete": "write",
+  "sessions.export": "read",
+  "sessions.lifecycle": "write",
+  "sessions.read": "read",
+  "sessions.sandbox_access": "write",
+  "skill_profiles.manage_own": "write",
+  "skills.manage": "write",
+  "skills.read": "read",
+  "workspace.audit.read": "read",
+  "workspace.members.read": "read",
+  "workspace.roles.read": "read",
+} as const satisfies Record<PersonalAccessTokenGrantablePermission, "read" | "write">;
+
+/** Whether a permission is grantable and only reads. */
+export function isPersonalAccessTokenReadOnlyPermission(
+  permission: PermissionId
+): permission is PersonalAccessTokenGrantablePermission {
+  return (
+    isPersonalAccessTokenGrantable(permission) &&
+    PERSONAL_ACCESS_TOKEN_PERMISSION_ACCESS[permission] === "read"
+  );
+}
+
 /** Every permission a token may be granted, in registry order. */
 export const PERSONAL_ACCESS_TOKEN_GRANTABLE_PERMISSIONS: readonly PersonalAccessTokenGrantablePermission[] =
   PERMISSION_IDS.filter(isPersonalAccessTokenGrantable);

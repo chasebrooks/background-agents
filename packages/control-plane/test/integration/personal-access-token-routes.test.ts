@@ -8,6 +8,8 @@ import { createExecutionContext, env, SELF } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PermissionId } from "@open-inspect/shared/rbac";
 import { AutomationStore } from "../../src/db/automation-store";
+import { AuthorizationService } from "../../src/authorization/service";
+import { restrictAuthorizationToGrant } from "../../src/authorization/personal-access-token-policy";
 import { PersonalAccessTokenStore } from "../../src/db/personal-access-tokens";
 import { SessionIndexStore } from "../../src/db/session-index";
 import { TeamMembershipStore } from "../../src/db/team-memberships";
@@ -36,6 +38,14 @@ const OTHER = "88888888888888888888888888888888";
 const ADMIN = "99999999999999999999999999999999";
 
 async function issueToken(userId: string, permissions: PermissionId[]): Promise<string> {
+  return (await issueTokenWithId(userId, permissions)).token;
+}
+
+/** `issueToken`, with the id its audit rows and grant are recorded under. */
+async function issueTokenWithId(
+  userId: string,
+  permissions: PermissionId[]
+): Promise<{ token: string; id: string }> {
   const result = await new PersonalAccessTokenStore(env.DB).issue({
     userId,
     name: "integration",
@@ -45,7 +55,7 @@ async function issueToken(userId: string, permissions: PermissionId[]): Promise<
     requestId: "integration",
   });
   if (result.kind !== "issued") throw new Error("token was not issued");
-  return result.token.token;
+  return { token: result.token.token, id: result.token.id };
 }
 
 function withToken(token: string, path: string, init: { method?: string; body?: unknown } = {}) {
@@ -650,7 +660,10 @@ describe("managing a session's lifecycle with a token", () => {
     const { stub, sessionName } = await initSession({ userId: OWNER, title: "Before" });
     // The test spawn fails on its own; archiving waits on the sandbox, so let that settle first.
     await waitForSandboxStatus(stub, "failed");
-    const token = await issueToken(OWNER, ["sessions.read", "sessions.lifecycle"]);
+    const { token, id: tokenId } = await issueTokenWithId(OWNER, [
+      "sessions.read",
+      "sessions.lifecycle",
+    ]);
     const sessions = new SessionIndexStore(env.DB);
 
     const renamed = await withToken(token, `/sessions/${sessionName}/title`, {
@@ -674,7 +687,11 @@ describe("managing a session's lifecycle with a token", () => {
       body: {},
     });
     expect(restored.status).toBe(200);
-    expect((await sessions.get(sessionName))?.status).not.toBe("archived");
+    // The fixture never ran a prompt, so its messages imply the draft status it was archived from.
+    await expect(restored.json()).resolves.toEqual({ status: "created" });
+    const afterRestore = await sessions.get(sessionName);
+    expect(afterRestore).not.toBeNull();
+    expect(afterRestore).toMatchObject({ status: "created" });
 
     const stopped = await withToken(token, `/sessions/${sessionName}/stop`, {
       method: "POST",
@@ -690,7 +707,7 @@ describe("managing a session's lifecycle with a token", () => {
           actor_user_id_snapshot: OWNER,
           metadata: expect.objectContaining({
             admission: "personal-access-token",
-            personalAccessTokenId: expect.any(String),
+            personalAccessTokenId: tokenId,
           }),
         },
       ]);
@@ -755,16 +772,29 @@ describe("managing a session's lifecycle with a token", () => {
   it("loses sessions.lifecycle without sessions.read, which every session's admission needs", async () => {
     const { sessionName } = await initSession({ userId: OWNER, title: "Kept" });
     // Issued straight into storage: issuance refuses this grant, but a grant can outlive a rule.
-    const token = await issueToken(OWNER, ["sessions.lifecycle"]);
+    const { token, id } = await issueTokenWithId(OWNER, ["sessions.lifecycle"]);
 
-    await expectRefusal(
-      await withToken(token, `/sessions/${sessionName}/title`, {
-        method: "PATCH",
-        body: { title: "Refused" },
-      }),
-      403,
-      "permission_required"
+    // The owner holds sessions.lifecycle and the stored grant names it, yet the token acts without
+    // it: narrowing drops a permission whose prerequisite the grant lacks.
+    const owner = await new AuthorizationService(env.DB).getEffectiveAuthorization(OWNER);
+    expect(owner.permissions).toContain("sessions.lifecycle");
+    const [stored] = (await new PersonalAccessTokenStore(env.DB).list(OWNER)).filter(
+      (entry) => entry.id === id
     );
+    expect(stored?.permissions).toEqual(["sessions.lifecycle"]);
+    expect(restrictAuthorizationToGrant(owner, stored!.permissions).permissions).toEqual([]);
+
+    // So the route refuses the very permission the grant names. Under legacy enforcement it checks
+    // sessions.lifecycle alone on a workspace session, so this refusal is the narrowing at work.
+    const response = await withToken(token, `/sessions/${sessionName}/title`, {
+      method: "PATCH",
+      body: { title: "Refused" },
+    });
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "permission_required",
+      permission: "sessions.lifecycle",
+    });
     expect(await new SessionIndexStore(env.DB).get(sessionName)).toMatchObject({ title: "Kept" });
   });
 
@@ -861,7 +891,10 @@ describe("managing another user's private session with a token", () => {
     }
     expect(await sessions.get(sessionName)).toMatchObject({ title: "Private", status: "created" });
 
-    const owner = await issueToken(WORKSPACE_OWNER, ["sessions.read", "sessions.lifecycle"]);
+    const { token: owner, id: ownerTokenId } = await issueTokenWithId(WORKSPACE_OWNER, [
+      "sessions.read",
+      "sessions.lifecycle",
+    ]);
     const renamed = await withToken(owner, `/sessions/${sessionName}/title`, {
       method: "PATCH",
       body: { title: "By the workspace owner" },
@@ -885,7 +918,7 @@ describe("managing another user's private session with a token", () => {
         {
           principal_kind: "personal-access-token",
           actor_user_id_snapshot: WORKSPACE_OWNER,
-          metadata: expect.objectContaining({ personalAccessTokenId: expect.any(String) }),
+          metadata: expect.objectContaining({ personalAccessTokenId: ownerTokenId }),
         },
       ]);
     }

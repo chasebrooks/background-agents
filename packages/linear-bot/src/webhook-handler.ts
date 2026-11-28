@@ -618,6 +618,9 @@ async function handleNewSession(
     log.warn("agent_session.prompt_too_long", {
       trace_id: traceId,
       issue_identifier: issue.identifier,
+      action: webhook.action,
+      has_prompt_context: Boolean(promptContext),
+      prompt_context_length: promptContext?.length ?? 0,
       prompt_length: prompt.length,
       prompt_limit: MAX_WEB_PROMPT_CHARS,
     });

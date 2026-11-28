@@ -49,6 +49,84 @@ export function buildPromptContextPrompt(promptContext: string): string {
   ].join("\n");
 }
 
+const SUB_ISSUES_OPEN = "<sub-issues>";
+const SUB_ISSUES_CLOSE = "</sub-issues>";
+
+/**
+ * Replaces each complete `<sub-issues>` element in Linear's promptContext.
+ * Unbalanced markup after the last complete element is left unchanged.
+ */
+function replaceSubIssues(promptContext: string, replace: (element: string) => string): string {
+  let result = "";
+  let cursor = 0;
+  for (;;) {
+    const start = promptContext.indexOf(SUB_ISSUES_OPEN, cursor);
+    if (start === -1) break;
+    let depth = 1;
+    let end = start + SUB_ISSUES_OPEN.length;
+    while (depth > 0) {
+      const nextClose = promptContext.indexOf(SUB_ISSUES_CLOSE, end);
+      if (nextClose === -1) return result + promptContext.slice(cursor);
+      const nextOpen = promptContext.indexOf(SUB_ISSUES_OPEN, end);
+      if (nextOpen !== -1 && nextOpen < nextClose) {
+        depth++;
+        end = nextOpen + SUB_ISSUES_OPEN.length;
+      } else {
+        depth--;
+        end = nextClose + SUB_ISSUES_CLOSE.length;
+      }
+    }
+    result += promptContext.slice(cursor, start) + replace(promptContext.slice(start, end));
+    cursor = end;
+  }
+  return result + promptContext.slice(cursor);
+}
+
+function firstElementText(markup: string, tag: string): string | undefined {
+  const open = `<${tag}>`;
+  const start = markup.indexOf(open);
+  if (start === -1) return undefined;
+  const end = markup.indexOf(`</${tag}>`, start + open.length);
+  return end === -1 ? undefined : markup.slice(start + open.length, end).trim();
+}
+
+function totalCountAttribute(element: string): string {
+  const totalCount = firstElementText(element, "total-count");
+  return totalCount && /^\d+$/.test(totalCount) ? ` total-count="${totalCount}"` : "";
+}
+
+/**
+ * Linear's promptContext lists every sub-issue of the issue and of its parent,
+ * each with ids, team, project, milestone, people and labels. Under a parent
+ * with many children that listing alone can exceed the prompt limit. This keeps
+ * one line per sub-issue (identifier, status and title) so the agent still sees
+ * the neighbouring work.
+ */
+export function compactPromptContextSubIssues(promptContext: string): string {
+  return replaceSubIssues(promptContext, (element) => {
+    const lines: string[] = [];
+    for (const [, item] of element.matchAll(/<items>([\s\S]*?)<\/items>/g)) {
+      // An item's own fields precede its nested team and project, which have
+      // identifiers of their own, so the first match is the sub-issue's.
+      const identifier = firstElementText(item, "identifier") ?? "";
+      const status = firstElementText(item, "status") ?? "";
+      const title = firstElementText(item, "title") ?? "";
+      lines.push(
+        `<item identifier="${escapeHtml(identifier)}" status="${escapeHtml(status)}">${title}</item>`
+      );
+    }
+    return `<sub-issues compacted="true"${totalCountAttribute(element)}>\n${lines.join("\n")}\n</sub-issues>`;
+  });
+}
+
+/** Replaces each sub-issue listing with an empty element that keeps its total count. */
+export function omitPromptContextSubIssues(promptContext: string): string {
+  return replaceSubIssues(
+    promptContext,
+    (element) => `<sub-issues omitted="true"${totalCountAttribute(element)} />`
+  );
+}
+
 export function buildFollowUpPrompt(params: {
   issueIdentifier: string;
   followUpContent: string;

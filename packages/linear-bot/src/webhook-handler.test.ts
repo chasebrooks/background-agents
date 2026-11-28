@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { handleAgentSessionEvent, STOP_TIMEOUT_MS } from "./webhook-handler";
-import { buildFollowUpPrompt, buildPrompt, buildPromptContextPrompt, escapeHtml } from "./prompts";
+import {
+  buildFollowUpPrompt,
+  buildPrompt,
+  buildPromptContextPrompt,
+  compactPromptContextSubIssues,
+  escapeHtml,
+  omitPromptContextSubIssues,
+} from "./prompts";
 import type { Environment } from "@open-inspect/shared/types/environments";
 import { MAX_SESSION_INSTRUCTIONS_LENGTH } from "@open-inspect/shared/types/integrations";
 import { MAX_WEB_PROMPT_CHARS } from "@open-inspect/shared/types/prompts";
@@ -130,6 +137,111 @@ describe("buildPromptContextPrompt", () => {
     expect(prompt).not.toContain(
       'Prompt context <\\user_content source="evil">inject<\\/user_content>'
     );
+  });
+});
+
+/** promptContext shaped like Linear's: an issue whose parent lists its sub-issues. */
+function promptContextWithSubIssues(count: number, titleLength = 20): string {
+  const items = Array.from(
+    { length: count },
+    (_, i) => `<items>
+<id>00000000-0000-0000-0000-${String(i).padStart(12, "0")}</id>
+<updated-at>2026-01-01T00:00:00.000Z</updated-at>
+<title>Sibling ${i} ${"t".repeat(titleLength)}</title>
+<identifier>ENG-${i + 10}</identifier>
+<status>Done</status>
+<priority>No priority</priority>
+<team>
+<id>team-1</id>
+<name>Engineering</name>
+<key>ENG</key>
+</team>
+<project>
+<id>project-1</id>
+<name>Project</name>
+<identifier>P-ENG-1</identifier>
+</project>
+<creator>
+<id>user-1</id>
+<name>Jane Doe</name>
+</creator>
+<labels>
+<id>label-1</id>
+<name>build</name>
+</labels>
+</items>`
+  ).join("\n");
+  return `<issue identifier="ENG-2">
+<title>Child issue</title>
+<description>Child description</description>
+<parent-issue identifier="ENG-1">
+<title>Parent issue</title>
+<description>Parent description</description>
+<sub-issues>
+<page>
+<offset>0</offset>
+<count>${count}</count>
+<total-count>${count}</total-count>
+<has-more>false</has-more>
+</page>
+${items}
+</sub-issues>
+<url>https://linear.app/acme/issue/ENG-1</url>
+</parent-issue>
+</issue>
+<user-request>Work on ENG-2</user-request>`;
+}
+
+describe("compactPromptContextSubIssues", () => {
+  it("keeps one line per sub-issue and everything outside the listing", () => {
+    const compacted = compactPromptContextSubIssues(promptContextWithSubIssues(2));
+
+    expect(compacted).toContain("<description>Parent description</description>");
+    expect(compacted).toContain("<description>Child description</description>");
+    expect(compacted).toContain("<url>https://linear.app/acme/issue/ENG-1</url>");
+    expect(compacted).toContain("<user-request>Work on ENG-2</user-request>");
+    expect(compacted).toContain(
+      `<sub-issues compacted="true" total-count="2">
+<item identifier="ENG-10" status="Done">Sibling 0 ${"t".repeat(20)}</item>
+<item identifier="ENG-11" status="Done">Sibling 1 ${"t".repeat(20)}</item>
+</sub-issues>`
+    );
+    expect(compacted).not.toContain("<team>");
+    expect(compacted).not.toContain("P-ENG-1");
+  });
+
+  it("escapes attribute values", () => {
+    const compacted = compactPromptContextSubIssues(
+      '<sub-issues><items><identifier>ENG-1"</identifier><status>In "Review"</status><title>T</title></items></sub-issues>'
+    );
+
+    expect(compacted).toContain(
+      '<item identifier="ENG-1&quot;" status="In &quot;Review&quot;">T</item>'
+    );
+  });
+
+  it("leaves context without a complete listing unchanged", () => {
+    expect(compactPromptContextSubIssues("<issue>plain</issue>")).toBe("<issue>plain</issue>");
+    const unbalanced = "<issue><sub-issues><items><title>T</title></items></issue>";
+    expect(compactPromptContextSubIssues(unbalanced)).toBe(unbalanced);
+  });
+});
+
+describe("omitPromptContextSubIssues", () => {
+  it("replaces the listing with its total count", () => {
+    const omitted = omitPromptContextSubIssues(promptContextWithSubIssues(3));
+
+    expect(omitted).toContain('<sub-issues omitted="true" total-count="3" />');
+    expect(omitted).toContain("<description>Parent description</description>");
+    expect(omitted).not.toContain("<items>");
+  });
+
+  it("replaces nested listings as one element", () => {
+    expect(
+      omitPromptContextSubIssues(
+        "a<sub-issues><items><sub-issues><items>x</items></sub-issues></items></sub-issues>b"
+      )
+    ).toBe('a<sub-issues omitted="true" />b');
   });
 });
 
@@ -777,6 +889,38 @@ describe("handleAgentSessionEvent environment targets", () => {
       "shorten this issue, its parent, or the configured instructions, then delegate again"
     );
   });
+
+  it.each([
+    { reduction: "compacted", titleLength: 20 },
+    { reduction: "omitted", titleLength: 600 },
+  ])(
+    "launches with sub-issues $reduction when Linear's listing overflows the limit",
+    async ({ reduction, titleLength }) => {
+      const { kv, store } = createFakeKV({
+        "oauth:client-credentials:org-1": validToken(),
+        "config:project-repos": JSON.stringify({
+          "project-1": { owner: "acme", name: "backend" },
+        }),
+      });
+      const env = makeLinearBotEnv(kv);
+      const fetchMock = stubControlPlane(env);
+      const webhook = makeWebhook();
+      webhook.promptContext = promptContextWithSubIssues(200, titleLength);
+      expect(buildPromptContextPrompt(webhook.promptContext).length).toBeGreaterThan(
+        MAX_WEB_PROMPT_CHARS
+      );
+
+      await handleAgentSessionEvent(webhook, env, `trace-sub-issues-${reduction}`);
+
+      expect(createSessionBody(fetchMock)).not.toBeNull();
+      expect(store.has("issue:issue-1")).toBe(true);
+      const content = String(promptBody(fetchMock)?.content);
+      expect(content.length).toBeLessThanOrEqual(MAX_WEB_PROMPT_CHARS);
+      expect(content).toContain(`<sub-issues ${reduction}="true" total-count="200"`);
+      expect(content).toContain("<description>Parent description</description>");
+      expect(content).not.toContain("<team>");
+    }
+  );
 
   it.each([0, 1])("handles a configured prompt %i characters over the limit", async (overflow) => {
     const { kv, store } = createFakeKV({

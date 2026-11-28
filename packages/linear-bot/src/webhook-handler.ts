@@ -39,7 +39,13 @@ import {
   describeSessionCreateFailure,
   resolveLinearTeamBinding,
 } from "./launch-admission";
-import { buildFollowUpPrompt, buildPrompt, buildPromptContextPrompt } from "./prompts";
+import {
+  buildFollowUpPrompt,
+  buildPrompt,
+  buildPromptContextPrompt,
+  compactPromptContextSubIssues,
+  omitPromptContextSubIssues,
+} from "./prompts";
 
 const log = createLogger("handler");
 
@@ -565,13 +571,38 @@ async function handleNewSession(
     return;
   }
 
+  const instructionsSuffix = integrationConfig.issueSessionInstructions
+    ? `\n\n## Additional Instructions\n\n${integrationConfig.issueSessionInstructions}`
+    : "";
   // Prefer Linear's promptContext (includes issue, comments, guidance)
-  let prompt = webhook.promptContext
-    ? buildPromptContextPrompt(webhook.promptContext)
-    : buildPrompt(issue, issueDetails, instructionComment, clarificationReply);
+  let prompt =
+    (webhook.promptContext
+      ? buildPromptContextPrompt(webhook.promptContext)
+      : buildPrompt(issue, issueDetails, instructionComment, clarificationReply)) +
+    instructionsSuffix;
 
-  if (integrationConfig.issueSessionInstructions) {
-    prompt += `\n\n## Additional Instructions\n\n${integrationConfig.issueSessionInstructions}`;
+  // Linear lists every sub-issue of the issue and its parent; under a large
+  // parent that listing alone overflows. Shrink it to one line per sub-issue,
+  // then to a count, keeping the issue, comments and parent description.
+  const promptContext = webhook.promptContext;
+  if (promptContext) {
+    for (const [reduction, reduce] of [
+      ["compacted", compactPromptContextSubIssues],
+      ["omitted", omitPromptContextSubIssues],
+    ] as const) {
+      if (prompt.length <= MAX_WEB_PROMPT_CHARS) break;
+      const reduced = buildPromptContextPrompt(reduce(promptContext)) + instructionsSuffix;
+      if (reduced.length >= prompt.length) continue;
+      log.info("agent_session.prompt_sub_issues_reduced", {
+        trace_id: traceId,
+        issue_identifier: issue.identifier,
+        reduction,
+        prompt_length: prompt.length,
+        reduced_prompt_length: reduced.length,
+        prompt_limit: MAX_WEB_PROMPT_CHARS,
+      });
+      prompt = reduced;
+    }
   }
 
   if (prompt.length > MAX_WEB_PROMPT_CHARS) {

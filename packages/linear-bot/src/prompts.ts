@@ -166,11 +166,27 @@ export function buildFollowUpPrompt(params: {
   ].join("\n");
 }
 
+/**
+ * Linear opens every delegated agent session with a generated comment naming
+ * the agent. It carries no request, so it is neither an instruction nor context.
+ */
+const AGENT_SESSION_HEADER = /^This thread is for an agent session with .+\.$/;
+
+export function isAgentSessionHeader(body: string): boolean {
+  return AGENT_SESSION_HEADER.test(body.trim());
+}
+
+/**
+ * @param appUserId The agent's own Linear user. Its comments are agent activity
+ *   (progress, results, errors such as a refused launch), not issue context, so
+ *   they are left out of the recent comments.
+ */
 export function buildPrompt(
   issue: { identifier: string; title: string; description?: string | null; url: string },
   issueDetails: LinearIssueDetails | null,
   comment?: { body: string } | null,
-  clarificationReply?: { body: string } | null
+  clarificationReply?: { body: string } | null,
+  appUserId?: string
 ): string {
   const parts: string[] = [
     `Linear Issue: ${issue.identifier}`,
@@ -214,9 +230,12 @@ export function buildPrompt(
     }
 
     // Include recent comments for context
-    if (issueDetails.comments.length > 0) {
+    const comments = issueDetails.comments.filter(
+      (c) => !(appUserId && c.user?.id === appUserId) && !isAgentSessionHeader(c.body)
+    );
+    if (comments.length > 0) {
       parts.push("", "---", "**Recent comments:**");
-      for (const c of issueDetails.comments.slice(-5)) {
+      for (const c of comments.slice(-5)) {
         const author = c.user?.name || "Unknown";
         parts.push(
           buildUntrustedUserContentBlock({
@@ -229,7 +248,7 @@ export function buildPrompt(
     }
   }
 
-  if (comment?.body) {
+  if (comment?.body && !isAgentSessionHeader(comment.body)) {
     parts.push(
       "",
       "---",

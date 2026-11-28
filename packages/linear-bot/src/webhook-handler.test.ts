@@ -110,6 +110,66 @@ describe("buildPrompt", () => {
   });
 });
 
+describe("buildPrompt agent session thread", () => {
+  const issue = {
+    identifier: "ENG-2",
+    title: "Child issue",
+    description: "Child description",
+    url: "https://linear.app/acme/issue/ENG-2",
+  };
+  const header = { body: "This thread is for an agent session with acme-agent." };
+  const details = {
+    id: "issue-2",
+    identifier: "ENG-2",
+    title: "Child issue",
+    description: "Child description",
+    url: "https://linear.app/acme/issue/ENG-2",
+    priority: 0,
+    priorityLabel: "No priority",
+    labels: [],
+    team: { id: "team-1", key: "ENG", name: "Engineering" },
+    comments: [
+      { ...header, user: null },
+      {
+        body: "The prompt for this issue is 75,315 characters, exceeding the limit.",
+        user: { id: "app-user-1", name: "acme-agent" },
+      },
+      { body: "Work on ENG-2", user: { id: "user-1", name: "Jane Doe" } },
+      { body: "Earlier human note", user: { name: "Bob" } },
+    ],
+  };
+
+  it("leaves out the agent's own comments and Linear's session header", () => {
+    const prompt = buildPrompt(issue, details, header, { body: "Work on ENG-2" }, "app-user-1");
+
+    expect(prompt).not.toContain("75,315 characters");
+    expect(prompt).not.toContain("This thread is for an agent session");
+    expect(prompt).not.toContain("**Agent instruction:**");
+    expect(prompt).toContain('<user_content source="linear_issue_comment" author="Jane Doe">');
+    expect(prompt).toContain("Earlier human note");
+    expect(prompt).toContain("**Repository clarification:**");
+  });
+
+  it("keeps a human-written instruction", () => {
+    const prompt = buildPrompt(issue, details, { body: "Fix the login bug" }, null, "app-user-1");
+
+    expect(prompt).toContain("**Agent instruction:**");
+    expect(prompt).toContain("Fix the login bug");
+  });
+
+  it("omits the comments section when only agent activity remains", () => {
+    const prompt = buildPrompt(
+      issue,
+      { ...details, comments: details.comments.slice(0, 2) },
+      null,
+      null,
+      "app-user-1"
+    );
+
+    expect(prompt).not.toContain("**Recent comments:**");
+  });
+});
+
 describe("buildPromptContextPrompt", () => {
   it("wraps promptContext as untrusted user input", () => {
     const prompt = buildPromptContextPrompt(

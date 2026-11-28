@@ -578,8 +578,13 @@ async function handleNewSession(
   let prompt =
     (webhook.promptContext
       ? buildPromptContextPrompt(webhook.promptContext)
-      : buildPrompt(issue, issueDetails, instructionComment, clarificationReply)) +
-    instructionsSuffix;
+      : buildPrompt(
+          issue,
+          issueDetails,
+          instructionComment,
+          clarificationReply,
+          webhook.appUserId
+        )) + instructionsSuffix;
 
   // Linear lists every sub-issue of the issue and its parent; under a large
   // parent that listing alone overflows. Shrink it to one line per sub-issue,

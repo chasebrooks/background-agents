@@ -150,6 +150,21 @@ describe("buildPrompt agent session thread", () => {
     expect(prompt).toContain("**Repository clarification:**");
   });
 
+  it("keeps human-written text that reads like Linear's header", () => {
+    const nearMatch =
+      "This thread is for an agent session with read-only access; do not modify files.";
+    const prompt = buildPrompt(
+      issue,
+      { ...details, comments: [{ body: nearMatch, user: { id: "user-1", name: "Jane Doe" } }] },
+      { body: nearMatch, userId: "user-1" },
+      null,
+      "app-user-1"
+    );
+
+    expect(prompt).toContain("**Agent instruction:**");
+    expect(prompt.split(nearMatch)).toHaveLength(3);
+  });
+
   it("keeps a human-written instruction", () => {
     const prompt = buildPrompt(issue, details, { body: "Fix the login bug" }, null, "app-user-1");
 
@@ -272,7 +287,7 @@ describe("compactPromptContextSubIssues", () => {
 
   it("escapes attribute values", () => {
     const compacted = compactPromptContextSubIssues(
-      '<sub-issues><items><identifier>ENG-1"</identifier><status>In "Review"</status><title>T</title></items></sub-issues>'
+      '<sub-issues><page></page><items><identifier>ENG-1"</identifier><status>In "Review"</status><title>T</title></items></sub-issues>'
     );
 
     expect(compacted).toContain(
@@ -296,12 +311,26 @@ describe("omitPromptContextSubIssues", () => {
     expect(omitted).not.toContain("<items>");
   });
 
-  it("replaces nested listings as one element", () => {
-    expect(
-      omitPromptContextSubIssues(
-        "a<sub-issues><items><sub-issues><items>x</items></sub-issues></items></sub-issues>b"
-      )
-    ).toBe('a<sub-issues omitted="true" />b');
+  it("leaves the tag name in issue text alone and still reduces the real listing", () => {
+    // Linear does not escape text, so a description can contain the tag literally.
+    const context = promptContextWithSubIssues(2).replace(
+      "<description>Child description</description>",
+      "<description>Mention <sub-issues> and <sub-issues>inline</sub-issues> here</description>"
+    );
+
+    const omitted = omitPromptContextSubIssues(context);
+
+    expect(omitted).toContain(
+      "<description>Mention <sub-issues> and <sub-issues>inline</sub-issues> here</description>"
+    );
+    expect(omitted).toContain('<sub-issues omitted="true" total-count="2" />');
+    expect(omitted).not.toContain("<items>");
+  });
+
+  it("leaves a listing unchanged when anything but items follows its page", () => {
+    const context = "<sub-issues><page></page><items><title>A</title></items>text</sub-issues>";
+
+    expect(omitPromptContextSubIssues(context)).toBe(context);
   });
 });
 
@@ -948,6 +977,70 @@ describe("handleAgentSessionEvent environment targets", () => {
     expect(activities[0]?.body).toContain(
       "shorten this issue, its parent, or the configured instructions, then delegate again"
     );
+  });
+
+  it("builds a retry prompt from Linear's comments without the agent's own activity", async () => {
+    vi.stubGlobal(
+      "fetch",
+      createLinearFetchMock({
+        clientCredentials: () => linearClientCredentialsResponse("transitioned-runtime-token"),
+        identity: () => linearIdentityResponse(),
+        graphql: ({ operationName, body }) => {
+          if (operationName !== "IssueDetails") return Response.json({ data: {} });
+          expect(String(body.query)).toContain("user { id name }");
+          return Response.json({
+            data: {
+              issue: {
+                id: "issue-1",
+                identifier: "ENG-42",
+                title: "Wire the fullstack flow",
+                description: "Spanning backend and frontend.",
+                url: "https://linear.app/acme/issue/ENG-42/wire",
+                priority: 0,
+                priorityLabel: "No priority",
+                labels: { nodes: [] },
+                project: { id: "project-1", name: "Fullstack" },
+                assignee: null,
+                team: { id: "team-1", key: "ENG", name: "Engineering" },
+                comments: {
+                  nodes: [
+                    { body: "This thread is for an agent session with acme-agent.", user: null },
+                    {
+                      body: "The prompt for this issue is 75,315 characters.",
+                      user: { id: "app-user-1", name: "acme-agent" },
+                    },
+                    { body: "Work on ENG-42", user: { id: "human-user-1", name: "Jane Doe" } },
+                  ],
+                },
+              },
+            },
+          });
+        },
+      })
+    );
+    const { kv } = createFakeKV({
+      "oauth:client-credentials:org-1": validToken(),
+      "config:project-repos": JSON.stringify({
+        "project-1": { owner: "acme", name: "backend" },
+      }),
+    });
+    const env = makeLinearBotEnv(kv);
+    const fetchMock = stubControlPlane(env);
+    const webhook = makeWebhook();
+    webhook.action = "prompted";
+    webhook.agentSession.comment = {
+      body: "This thread is for an agent session with acme-agent.",
+      userId: null,
+    };
+    webhook.agentActivity = { content: { body: "Work on ENG-42" }, userId: "human-user-1" };
+
+    await handleAgentSessionEvent(webhook, env, "trace-retry-fallback");
+
+    const content = String(promptBody(fetchMock)?.content);
+    expect(content).toContain('<user_content source="linear_issue_comment" author="Jane Doe">');
+    expect(content).not.toContain("75,315 characters");
+    expect(content).not.toContain("This thread is for an agent session");
+    expect(content).not.toContain("**Agent instruction:**");
   });
 
   it.each([

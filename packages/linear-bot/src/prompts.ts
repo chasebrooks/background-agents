@@ -49,34 +49,44 @@ export function buildPromptContextPrompt(promptContext: string): string {
   ].join("\n");
 }
 
-const SUB_ISSUES_OPEN = "<sub-issues>";
+// Linear does not escape text in promptContext (a title can contain a literal
+// `<tag>`), so a listing is recognised by its whole structure, not its tag
+// name: `<sub-issues>`, a `<page>` block, then only `<items>` up to the close.
+const SUB_ISSUES_LISTING_START = /<sub-issues>\s*<page>/g;
 const SUB_ISSUES_CLOSE = "</sub-issues>";
+const PAGE_CLOSE = "</page>";
+const ITEM_OPEN = "<items>";
+const ITEM_CLOSE = "</items>";
+
+/** End of the listing starting at `start`, or -1 when its structure does not hold. */
+function subIssuesListingEnd(text: string, start: number): number {
+  const pageClose = text.indexOf(PAGE_CLOSE, start);
+  if (pageClose === -1) return -1;
+  let cursor = pageClose + PAGE_CLOSE.length;
+  for (;;) {
+    while (/\s/.test(text.charAt(cursor))) cursor++;
+    if (text.startsWith(SUB_ISSUES_CLOSE, cursor)) return cursor + SUB_ISSUES_CLOSE.length;
+    if (!text.startsWith(ITEM_OPEN, cursor)) return -1;
+    const itemClose = text.indexOf(ITEM_CLOSE, cursor);
+    if (itemClose === -1) return -1;
+    cursor = itemClose + ITEM_CLOSE.length;
+  }
+}
 
 /**
- * Replaces each complete `<sub-issues>` element in Linear's promptContext.
- * Unbalanced markup after the last complete element is left unchanged.
+ * Replaces each sub-issue listing in Linear's promptContext. Anything whose
+ * structure cannot be established, such as the tag name in an issue's own
+ * text, is left unchanged.
  */
 function replaceSubIssues(promptContext: string, replace: (element: string) => string): string {
   let result = "";
   let cursor = 0;
-  for (;;) {
-    const start = promptContext.indexOf(SUB_ISSUES_OPEN, cursor);
-    if (start === -1) break;
-    let depth = 1;
-    let end = start + SUB_ISSUES_OPEN.length;
-    while (depth > 0) {
-      const nextClose = promptContext.indexOf(SUB_ISSUES_CLOSE, end);
-      if (nextClose === -1) return result + promptContext.slice(cursor);
-      const nextOpen = promptContext.indexOf(SUB_ISSUES_OPEN, end);
-      if (nextOpen !== -1 && nextOpen < nextClose) {
-        depth++;
-        end = nextOpen + SUB_ISSUES_OPEN.length;
-      } else {
-        depth--;
-        end = nextClose + SUB_ISSUES_CLOSE.length;
-      }
-    }
-    result += promptContext.slice(cursor, start) + replace(promptContext.slice(start, end));
+  for (const match of promptContext.matchAll(SUB_ISSUES_LISTING_START)) {
+    if (match.index < cursor) continue;
+    const end = subIssuesListingEnd(promptContext, match.index);
+    if (end === -1) continue;
+    result +=
+      promptContext.slice(cursor, match.index) + replace(promptContext.slice(match.index, end));
     cursor = end;
   }
   return result + promptContext.slice(cursor);
@@ -169,11 +179,13 @@ export function buildFollowUpPrompt(params: {
 /**
  * Linear opens every delegated agent session with a generated comment naming
  * the agent. It carries no request, so it is neither an instruction nor context.
+ * Linear writes it without a user, so a comment with an author is never taken
+ * for it, whatever its text.
  */
-const AGENT_SESSION_HEADER = /^This thread is for an agent session with .+\.$/;
+const AGENT_SESSION_HEADER = /^This thread is for an agent session with [^\n]+\.$/;
 
-export function isAgentSessionHeader(body: string): boolean {
-  return AGENT_SESSION_HEADER.test(body.trim());
+export function isAgentSessionHeader(body: string, hasAuthor: boolean): boolean {
+  return !hasAuthor && AGENT_SESSION_HEADER.test(body.trim());
 }
 
 /**
@@ -184,7 +196,7 @@ export function isAgentSessionHeader(body: string): boolean {
 export function buildPrompt(
   issue: { identifier: string; title: string; description?: string | null; url: string },
   issueDetails: LinearIssueDetails | null,
-  comment?: { body: string } | null,
+  comment?: { body: string; userId?: string | null } | null,
   clarificationReply?: { body: string } | null,
   appUserId?: string
 ): string {
@@ -231,7 +243,8 @@ export function buildPrompt(
 
     // Include recent comments for context
     const comments = issueDetails.comments.filter(
-      (c) => !(appUserId && c.user?.id === appUserId) && !isAgentSessionHeader(c.body)
+      (c) =>
+        !(appUserId && c.user?.id === appUserId) && !isAgentSessionHeader(c.body, Boolean(c.user))
     );
     if (comments.length > 0) {
       parts.push("", "---", "**Recent comments:**");
@@ -248,7 +261,7 @@ export function buildPrompt(
     }
   }
 
-  if (comment?.body && !isAgentSessionHeader(comment.body)) {
+  if (comment?.body && !isAgentSessionHeader(comment.body, Boolean(comment.userId))) {
     parts.push(
       "",
       "---",
